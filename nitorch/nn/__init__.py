@@ -4,3 +4,4 @@
 from ._conv import *
 from ._spatial import *
 from ._cnn import *
+from .losses import *
