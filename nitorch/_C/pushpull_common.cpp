@@ -1971,7 +1971,7 @@ void PushPullImpl<scalar_t,offset_t>::interpolate2d_bilinear(
   scalar_t w00 = dx0 * dy0;
   scalar_t w10 = dx1 * dy0;
   scalar_t w01 = dx0 * dy1;
-  scalar_t w11 = dx1 * dy1;;
+  scalar_t w11 = dx1 * dy1;
 
   // Sign (/!\ compute sign before warping indices)
   int8_t  sx1 = bound::sign(bound0, ix0+1, src_X);
@@ -2498,7 +2498,7 @@ std::deque<Tensor> pushpull(
   info.ioset(source, grid);
 
   return AT_DISPATCH_FLOATING_TYPES_AND_HALF(grid.scalar_type(), "pushpull", [&] {
-    if (canUse32BitIndexMath(source) && canUse32BitIndexMath(grid))
+    if (info.canUse32BitIndexMath())
     {
       PushPullImpl<scalar_t, int32_t> algo(info);
       pushpull_kernel<<<GET_BLOCKS(algo.voxcount()), CUDA_NUM_THREADS, 0,
@@ -2530,7 +2530,7 @@ std::deque<Tensor> pushpull(
   info.ioset(source, grid, target);
 
   return AT_DISPATCH_FLOATING_TYPES_AND_HALF(grid.scalar_type(), "pushpull", [&] {
-    if info.canUse32BitIndexMath()
+    if (info.canUse32BitIndexMath())
     {
       PushPullImpl<scalar_t, int32_t> algo(info);
       pushpull_kernel<<<GET_BLOCKS(algo.voxcount()), CUDA_NUM_THREADS, 0,
@@ -2540,7 +2540,7 @@ std::deque<Tensor> pushpull(
     else
     {
       PushPullImpl<scalar_t, int64_t> algo(info);
-      pushpull_kernel<<<GET_BLOCKS(f.voxcount()), CUDA_NUM_THREADS, 0,
+      pushpull_kernel<<<GET_BLOCKS(algo.voxcount()), CUDA_NUM_THREADS, 0,
                         at::cuda::getCurrentCUDAStream()>>>(algo);
       return algo.output;
     }
