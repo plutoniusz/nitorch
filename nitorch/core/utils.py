@@ -1,5 +1,5 @@
 import torch
-from .pyutils import pad_list
+from .pyutils import make_list, make_tuple
 
 
 def as_tensor(input, dtype=None, device=None):
@@ -64,7 +64,7 @@ def unsqueeze(input, dim=0, ndim=1):
         dim = [dim]
     if not isinstance(ndim, (list, tuple)):
         ndim = [ndim]
-    ndim = pad_list(ndim, len(dim))
+    ndim = make_list(ndim, len(dim))
     extra_dims = 0
     for d, nd in zip(dim, ndim):
         d += extra_dims
@@ -162,3 +162,104 @@ def requires_grad(ctx, name):
         if n == name:
             return g
     return False
+
+
+def slice_tensor(x, index, dim=None):
+    """Index a tensor along one or several dimensions.
+
+    This function is relatively similar to `torch.index_select`, except
+    that it uses the native indexing mechanism and can therefore
+    returns a tensor that use the same storage as the input tensor.
+
+    Parameters
+    ----------
+    x : tensor
+        Input tensor.
+    index : index_like or tuple[index_like]
+        Indices to select along each dimension in `dim`.
+        If multiple dimensions are indexed, they *must* be held in a
+        tuple (not a list). Each index can be a long, list of long,
+        slice or tensor of long, but *cannot* be an ellipsis or
+        tensor of bool.
+    dim : int or sequence[int], optional
+        Dimensions to index. If it is a list, `index` *must* be a tuple.
+        By default, the last `n` dimensions (where `n` is the number of
+        indices in `index`) are used.
+
+
+    Returns
+    -------
+    y : tensor
+        Output tensor.
+
+    """
+    # format (dim, index) as (list, tuple) with same length
+    if not isinstance(index, tuple):
+        index = (index,)
+    if dim is None:
+        dim = list(range(-len(index), 0))
+    dim = make_list(dim)
+    nb_dim = max(len(index), len(dim))
+    dim = make_list(dim, nb_dim)
+    index = make_tuple(index, nb_dim)
+
+    # build index
+    full_index = [slice(None)] * x.dim()
+    for d, ind in zip(dim, index):
+        if ind is Ellipsis or (torch.is_tensor(ind) and
+                               ind.dtype == torch.bool):
+            raise TypeError('`index` cannot be an ellipsis or mask')
+        full_index[d] = ind
+    full_index = tuple(full_index)
+
+    return x.__getitem__(full_index)
+
+
+def broadcast_to(*tensors):
+    """Broadcast to a given shape.
+
+    Parameters
+    ----------
+    *tensors : any number of tensors
+    shape : list[int]
+        Target shape that must be compatible with all tensors
+        according to :ref:`broadcasting-semantics`.
+
+    Returns
+    -------
+    *tensors : tensors 'reshaped' to shape.
+
+    .. warning::
+        This function makes use of zero strides, so more than
+        one output values can point to the same memory location.
+        It is advided not too write in these tensors.
+
+    """
+    *tensors, shape = tensors
+    tensors = [torch.as_tensor(tensor) for tensor in tensors]
+    for i, tensor in enumerate(tensors):
+        # 1. pad with singleton dimensions on the left
+        if len(shape) > tensor.dim():
+            tensor = unsqueeze(tensor, dim=0, ndim=len(shape)-tensor.dim())
+        elif len(shape) < tensor.dim():
+            raise ValueError('Cannot broadcast shape {} to {}: '
+                             'the target shape has less dimensions that '
+                             'the input shape.'.format(tensor.shape, shape))
+        # 2. zero-stride singleton dimensions
+        strides = list(tensor.stride())
+        for d in range(len(shape)):
+            if tensor.shape[d] != shape[d]:
+                if tensor.shape[d] == 1:
+                    strides[d] = 0
+                else:
+                    raise ValueError('Cannot broadcast shape {} to {}: '
+                                     'shapes have different non-singleton '
+                                     'dimensions.'.format(tensor.shape, shape))
+        tensor = tensor.as_strided(shape, strides)
+        tensors[i] = tensor
+
+    # return
+    if len(tensors) == 1:
+        return tensors[0]
+    else:
+        return tuple(tensors)
