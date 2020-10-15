@@ -27,6 +27,164 @@ def round(t, decimals=0):
     return torch.round(t * 10 ** decimals) / (10 ** decimals)
 
 
+def nansum(input, *args, inplace=False, **kwargs):
+    """Compute the sum of a tensor, excluding nans.
+
+    Parameters
+    ----------
+    input : tensor
+        Input tensor.
+    dim : int or list[int], optional
+        Dimensions to reduce.
+    keepdim : bool, default=False
+        Keep reduced dimensions.
+    inplace : bool, default=False
+        Authorize working inplace.
+    dtype : dtype, default=input.dtype
+        Accumulator data type
+    out : tensor, optional
+        Output placeholder.
+
+    Returns
+    -------
+    out : tensor
+        Output tensor
+
+    """
+    input = torch.as_tensor(input)
+    if not inplace:
+        input = input.clone()
+    mask = torch.isnan(input)
+    if input.requires_grad:
+        input = input * (~mask)
+    else:
+        input[mask] = 0
+    return torch.sum(input, *args, **kwargs)
+
+
+def nanmean(input, *args, inplace=False, **kwargs):
+    """Compute the mean of a tensor, excluding nans.
+
+    Parameters
+    ----------
+    input : tensor
+        Input tensor.
+    dim : int or list[int], optional
+        Dimensions to reduce.
+    keepdim : bool, default=False
+        Keep reduced dimensions.
+    inplace : bool, default=False
+        Authorize working inplace.
+    dtype : dtype, default=input.dtype
+        Accumulator data type
+    out : tensor, optional
+        Output placeholder.
+
+    Returns
+    -------
+    out : tensor
+        Output tensor
+
+    """
+    input = torch.as_tensor(input)
+    if not inplace:
+        input = input.clone()
+    mask = torch.isnan(input)
+    if input.requires_grad:
+        mask = ~mask
+        input = input * mask
+    else:
+        input[mask] = 0
+        mask = ~mask
+    weights = mask.sum(*args, **kwargs).to(kwargs.get('dtype', input.dtype))
+    return torch.sum(input, *args, **kwargs) / weights
+
+
+def nanvar(input, *args, unbiased=True, inplace=False, **kwargs):
+    """Compute the variance of a tensor, excluding nans.
+
+    Parameters
+    ----------
+    input : tensor
+        Input tensor.
+    dim : int or list[int], optional
+        Dimensions to reduce.
+    keepdim : bool, default=False
+        Keep reduced dimensions.
+    unbiased : bool, default=True
+        Whether to use the unbiased estimation or not.
+    inplace : bool, default=False
+        Authorize working inplace.
+    dtype : dtype, default=input.dtype
+        Accumulator data type
+
+    Returns
+    -------
+    out : tensor
+        Output tensor
+
+    """
+    input = torch.as_tensor(input)
+    requires_grad = input.requires_grad
+    if not inplace:
+        input = input.clone()
+    mask = torch.isnan(input)
+    if requires_grad:
+        mask = ~mask
+        input = input * mask
+    else:
+        input[mask] = 0
+        mask = ~mask
+    weights = mask.sum(*args, **kwargs).to(kwargs.get('dtype', input.dtype))
+    mean = torch.sum(input, *args, **kwargs) / weights
+    input = input.square() if requires_grad else input.square_()
+    var = torch.sum(input, *args, **kwargs) / weights
+    if requires_grad:
+        var = var - mean
+        if unbiased:
+            var = var * weights / (weights - 1)
+    else:
+        var -= mean
+        if unbiased:
+            weights /= (weights - 1)
+            var *= weights
+    return var
+
+
+def nanstd(input, *args, unbiased=True, inplace=False, **kwargs):
+    """Compute the standard deviation of a tensor, excluding nans.
+
+    Parameters
+    ----------
+    input : tensor
+        Input tensor.
+    dim : int or list[int], optional
+        Dimensions to reduce.
+    keepdim : bool, default=False
+        Keep reduced dimensions.
+    unbiased : bool, default=True
+        Whether to use the unbiased estimation or not.
+    inplace : bool, default=False
+        Authorize working inplace.
+    dtype : dtype, default=input.dtype
+        Accumulator data type
+
+    Returns
+    -------
+    out : tensor
+        Output tensor
+
+    """
+    input = nanvar(input, *args, unbiased=unbiased, inplace=inplace, **kwargs)
+    input = input.sqrt_() if not input.requires_grad else input.sqrt()
+    return input
+
+
+# TODO:
+#   The following functions should be replaced by tensor-compatible
+#   equivalents in linalg
+
+
 def expm(M):
     """ Computes the matrix exponential of M.
 
