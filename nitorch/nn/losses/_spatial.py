@@ -11,7 +11,35 @@ from ._base import Loss
 
 
 def diff1d(x, order=1, dim=-1, voxel_size=1, side='c', bound='dct2'):
-    """Finite differences along a dimension."""
+    """Finite differences along a dimension.
+
+    Parameters
+    ----------
+    x : tensor
+        Input tensor
+    order : int, default=1
+        Finite difference order (1=first derivative, 2=second derivative, ...)
+    dim : int, default=-1
+        Dimension along which to compute finite differences.
+    voxel_size : float
+        Unit size used in the denominator of the gradient.
+    side : {'c', 'f', 'b'}, default='c'
+        * 'c': central finite differences
+        * 'f': forward finite differences
+        * 'b': backward finite differences
+    bound : {'dct2', 'dct1', 'dst2', 'dst1', 'dft', 'repeat', 'zero'}, default='dct2'
+        Boundary condition.
+
+    Returns
+    -------
+    diff : tensor
+        Tensor of finite differences, with same shape as the input tensor.
+
+    """
+
+    # TODO:
+    #   - move to nitorch.spatial._finite_differences
+    #   - check high order central
 
     # check options
     bound = bound.lower()
