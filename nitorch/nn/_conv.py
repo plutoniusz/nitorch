@@ -3,6 +3,7 @@
 
 import torch
 from torch import nn as tnn
+from ._base import nitorchmodule
 from ..core.pyutils import make_list, rep_list, getargs
 from copy import copy
 import math
@@ -56,6 +57,7 @@ _activations = {
 }
 
 
+@nitorchmodule
 class Conv(tnn.Module):
     """Convolution layer (with activation).
 
@@ -107,20 +109,20 @@ class Conv(tnn.Module):
         # Select Conv
         if transposed:
             if dim == 1:
-                self.conv = tnn.ConvTranspose1d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.ConvTranspose1d)(*args, **kwargs)
             elif dim == 2:
-                self.conv = tnn.ConvTranspose2d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.ConvTranspose2d)(*args, **kwargs)
             elif dim == 3:
-                self.conv = tnn.ConvTranspose3d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.ConvTranspose3d)(*args, **kwargs)
             else:
                 NotImplementedError('Conv is only implemented in 1, 2, or 3D.')
         else:
             if dim == 1:
-                self.conv = tnn.Conv1d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.Conv1d)(*args, **kwargs)
             elif dim == 2:
-                self.conv = tnn.Conv2d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.Conv2d)(*args, **kwargs)
             elif dim == 3:
-                self.conv = tnn.Conv3d(*args, **kwargs)
+                self.conv = nitorchmodule(tnn.Conv3d)(*args, **kwargs)
             else:
                 NotImplementedError('Conv is only implemented in 1, 2, or 3D.')
 

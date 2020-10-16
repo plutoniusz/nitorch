@@ -4,10 +4,12 @@
 import torch
 from torch import nn as tnn
 from ._conv import Conv
+from ._base import nitorchmodule
 from ..core.pyutils import make_list
 from collections import OrderedDict
 
 
+@nitorchmodule
 class Encoder(tnn.ModuleList):
     """Encoder network (for U-nets, VAEs, etc.)"""
 
@@ -53,6 +55,7 @@ class Encoder(tnn.ModuleList):
         return output[::-1]
 
 
+@nitorchmodule
 class Decoder(tnn.ModuleList):
     """Decoder network (for U-nets, VAEs, etc.)"""
 
@@ -127,6 +130,7 @@ class Decoder(tnn.ModuleList):
         return x
 
 
+@nitorchmodule
 class StackedConv(tnn.Sequential):
     """Stacked convolutions, without up/down-sampling."""
 
@@ -154,6 +158,7 @@ class StackedConv(tnn.Sequential):
         super().__init__(*modules)
 
 
+@nitorchmodule
 class UNet(tnn.Sequential):
     """Fully-convolutional U-net."""
 
