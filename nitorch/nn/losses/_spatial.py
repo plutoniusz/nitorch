@@ -1,8 +1,12 @@
+"""
+Losses that assume an underlying spatial organization
+(gradients, curvature, etc.)
+"""
+
 import torch
 import torch.nn as tnn
 from ...core.pyutils import make_list, prod
 from ...core.utils import slice_tensor, broadcast_to
-from ...spatial import BoundType
 from ._base import Loss
 
 

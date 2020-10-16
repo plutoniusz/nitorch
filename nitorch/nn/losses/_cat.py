@@ -1,3 +1,5 @@
+"""Losses for categorical data."""
+
 import torch
 from ._base import Loss
 from ...core.math import nansum

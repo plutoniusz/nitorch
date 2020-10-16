@@ -1,4 +1,5 @@
-"""Base class for losses.
+"""
+Base class for losses.
 
 Reduction mecanisms are implemented here.
 """
@@ -17,6 +18,7 @@ class Loss(tnn.Module):
         ----------
         reduction : {'mean', 'sum'} or callable, default='mean'
             Type of reduction to apply.
+
 
         """
         super().__init__(*args, **kwargs)
