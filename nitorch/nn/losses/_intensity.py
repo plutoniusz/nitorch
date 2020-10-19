@@ -29,13 +29,13 @@ class MutualInfoLoss(Loss):
 
         Parameters
         ----------
-        min_val : float or list[float], default=min of input
+        min_val : float or [float, float], default=min of input
             Minimum value in the joint histogram (per image if list).
-        max_val : float or list[float], default=max of input
+        max_val : float or [float, float], default=max of input
             Maximum value in the joint histogram (per image if list).
-        nb_bins : int or list[int], default=32
+        nb_bins : int or [int, int], default=32
             Number of bins in the histogram (per image if list).
-        fwhm : float or list[float], default=1
+        fwhm : float or [float, float], default=1
             Full-width half-max of the Gaussian window, in bins.
         normalize : bool or str or callable, default='arithmetic'
             Compute the normalized mutual information.
@@ -77,8 +77,6 @@ class MutualInfoLoss(Loss):
         # check inputs
         x = torch.as_tensor(x)
         y = torch.as_tensor(y)
-        x0 = x
-        y0 = y
         dtype = x.dtype
         device = x.device
         nb_dim = x.dim() - 2
@@ -124,9 +122,9 @@ class MutualInfoLoss(Loss):
             max = unsqueeze(max, dim=2, ndim=4 - max.dim())
             # -> shape = [B, C, 1, 1]
             bins = torch.linspace(0, 1, nbins, dtype=dtype, device=device)
-            bins = unsqueeze(bins, dim=0, ndim=3)   # -> shape = [1, 1, 1, nb_bins]
-            bins = min + bins * (max - min)         # -> shape = [B, C, 1, nb_bins]
-            binwidth = (max-min)/(nbins-1)          # -> shape = [B, C, 1, 1]
+            bins = unsqueeze(bins, dim=0, ndim=3)   # -> [1, 1, 1, nb_bins]
+            bins = min + bins * (max - min)         # -> [B, C, 1, nb_bins]
+            binwidth = (max-min)/(nbins-1)          # -> [B, C, 1, 1]
             return bins, binwidth
 
         # prepare bins
@@ -134,15 +132,15 @@ class MutualInfoLoss(Loss):
         y_bins, y_binwidth = get_bins(y, y_min, y_max, y_nbins)
 
         # compute distances and collapse
-        x = x[..., None]  # -> shape [B, C, N, 1]
-        y = y[..., None]  # -> shape [B, C, N, 1]
+        x = x[..., None]                            # -> [B, C, N, 1]
+        y = y[..., None]                            # -> [B, C, N, 1]
         x_var = ((x_fwhm * x_binwidth) ** 2) / (8 * math.log(2))
-        x = -(x - x_bins).square() / (2 * x_var)
-        x = x.exp()
+        x = -(x - x_bins).square() / (2 * x_var)    # -> [B, C, N, nb_bins]
+        x = x.exp().sum(dim=-2)                     # -> [B, C, nb_bins]
         y_var = ((y_fwhm * y_binwidth) ** 2) / (8 * math.log(2))
         y = -(y - y_bins).square() / (2 * y_var)
-        y = y.exp()
-        # -> shape [B, C, N, nb_bins]
+        y = y.exp().sum(dim=-2)
+        # -> shape [B, C, nb_bins]
 
         def pnorm(x, dims=-1):
             """Normalize a tensor so that it's sum across `dims` is one."""
@@ -152,8 +150,8 @@ class MutualInfoLoss(Loss):
             return x
 
         # compute probabilities
-        p_x = pnorm(x.sum(dim=-2))                # -> [B, C, nb_bins]
-        p_y = pnorm(y.sum(dim=-2))                # -> [B, C, nb_bins]
+        p_x = pnorm(x)                            # -> [B, C, nb_bins]
+        p_y = pnorm(y)                            # -> [B, C, nb_bins]
         x = x[..., None]                          # -> [B, C, N, nb_bins, 1]
         y = y[..., None, :]                       # -> [B, C, N, 1, nb_bins]
         p_xy = pnorm((x*y).sum(dim=2), [-1, -2])  # -> [B, C, nb_bins, nb_bins]
