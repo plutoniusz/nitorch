@@ -11,6 +11,7 @@ import collections
 from setuptools import setup, find_packages, Extension
 from buildtools import *
 import torch
+import warnings
 
 
 # ~~~ libnitorch files
