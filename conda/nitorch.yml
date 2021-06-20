@@ -4,7 +4,7 @@ channels:
   - pytorch
 dependencies:
   - python=3.6
-  - pytorch=1.5
+  - pytorch=1.7
   - cudatoolkit=10.1
   - numpy
   - nibabel
