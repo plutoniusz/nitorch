@@ -182,8 +182,8 @@ def cuda_check():
     ok = (local_version[0] == torch_version[0] and
           local_version[1] == torch_version[1])
     if not ok:
-        warnings.showwarning('Your version of CuDNN is v{}.{} while PyTorch was compiled with'
-                            'CuDNN v{}.{}. NiTorch cannot be compiled with CuDNN.'.format(
+        warnings.showwarning('Your version of CUDA is v{}.{} while PyTorch was compiled with'
+                             'CUDA v{}.{}. NiTorch cannot be compiled with CUDA.'.format(
                             local_version[0], local_version[1],
                             torch_version[0], torch_version[1]), 
                             RuntimeWarning, 'setup.py', 188, line='')
