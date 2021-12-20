@@ -42,6 +42,7 @@ class PreprocOptions(Option):
 class GREEQOptions(Option):
     """Encapsulate all options"""
     likelihood: str = 'gauss'           # Likelihood model: {'gauss', 'chi'}
+    noisemodel: str = 'rice'  # Noise model: {'rice', 'chi'}
     preproc: PreprocOptions = PreprocOptions()
     recon: ReconOptions = ReconOptions()
     optim: OptimOptions = OptimOptions()

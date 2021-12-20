@@ -9,7 +9,7 @@ from nitorch.tools.qmri.param import ParameterMap
 from ._param import GREEQParameterMaps
 
 
-def postproc(maps):
+def postproc(maps, noise = None, dof = None):
     """Generate PD, R1, R2* (and MTsat) volumes from log-parameters
 
     Parameters
@@ -33,6 +33,21 @@ def postproc(maps):
     maps.pd.volume = maps.pd.fdata().exp_()
     maps.r2s.name = 'PD'
     maps.r2s.unit = 'a.u.'
+
+    if noise and not getattr(maps.r1, 'noise', 0):
+        maps.r1.noise = noise
+    if noise and not getattr(maps.r2s, 'noise', 0):
+        maps.r2s.noise = noise
+    if noise and not getattr(maps.pd, 'noise', 0):
+        maps.pd.noise = noise
+    if dof and not getattr(maps.r1, 'dof', 0):
+        maps.r1.dof = dof
+    if dof and not getattr(maps.r2s, 'dof', 0):
+        maps.r2s.dof = dof
+    if dof and not getattr(maps.pd, 'dof', 0):
+        maps.pd.dof = dof
+
+
     if hasattr(maps, 'mt'):
         maps.mt.volume = maps.mt.fdata().neg_().exp_()
         maps.mt.volume += 1
@@ -40,7 +55,14 @@ def postproc(maps):
         maps.mt.volume *= 100
         maps.mt.name = 'MTsat'
         maps.mt.unit = 'p.u.'
+
+        if noise and not getattr(maps.mt, 'noise', 0):
+            maps.mt.noise = noise
+        if dof and not getattr(maps.mt, 'dof', 0):
+            maps.mt.dof = dof
+
         return maps.pd, maps.r1, maps.r2s, maps.mt
+
     return maps.pd, maps.r1, maps.r2s
 
 
@@ -66,8 +88,7 @@ def preproc(data, transmit=None, receive=None, opt=None):
     device = opt.backend.device
 
     backend = dict(dtype=dtype, device=device)
-    chi = opt.likelihood[0].lower() == 'c'
-    
+    noisemodel = opt.noisemodel[0].lower() == 'c'
     # --- estimate hyper parameters ---
     logmeans = []
     te = []
@@ -82,12 +103,11 @@ def preproc(data, transmit=None, receive=None, opt=None):
             if opt.verbose:
                 print(f'Estimate noise: contrast {c+1:d} - echo {e+1:2d}', end='\r')
             dat = echo.fdata(**backend, rand=True, cache=False)
-
-            prm_noise, prm_not_noise = estimate_noise(dat, chi=chi)
+            
+            prm_noise, prm_not_noise = estimate_noise(dat, chi=noisemodel)
             sd0 = prm_noise['sd']
             mu1 = prm_not_noise['mean']
             dof0 = prm_noise.get('dof', 0)
-
             echo.mean = mu1.item()
             means.append(mu1)
             vars.append(sd0.square())
@@ -95,7 +115,7 @@ def preproc(data, transmit=None, receive=None, opt=None):
         means = torch.stack(means)
         vars = torch.stack(vars)
         var = (means*vars).sum() / means.sum()
-        if chi:
+        if noisemodel:
             dofs = torch.stack(dofs)
             # degrees of freedom weighted by the mean of each echo
             # later echoes contribute less to the average dof
@@ -105,7 +125,7 @@ def preproc(data, transmit=None, receive=None, opt=None):
         if not getattr(contrast, 'noise', 0):
             contrast.noise = var.item()
         if not getattr(contrast, 'dof', 0):
-            contrast.dof = dofs.item() if chi else 2
+            contrast.dof = dofs.item() if noisemodel else 2
 
         te.append(contrast.te)
         tr.append(contrast.tr)
@@ -116,7 +136,7 @@ def preproc(data, transmit=None, receive=None, opt=None):
         print('')
         sds = [c.noise ** 0.5 for c in data]
         print('    - standard deviation:  [' + ', '.join([f'{s:.2f}' for s in sds]) + ']')
-        if chi:
+        if noisemodel:
             dofs = [c.dof for c in data]
             print('    - degrees of freedom:  [' + ', '.join([f'{s:.2f}' for s in dofs]) + ']')
 
