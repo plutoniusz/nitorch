@@ -11,7 +11,8 @@ from .optionals import numpy as np
 import numbers
 import os
 import random
-from typing import Optional
+from typing import Optional, List
+import contextlib
 Tensor = torch.Tensor
 
 
@@ -65,24 +66,6 @@ def torch_version(mode, version):
     current_version = (int(major), int(minor), int(patch))
     version = py.make_list(version)
     return _compare_versions(current_version, mode, version)
-
-
-def reproducible(seed=1234):
-    """Ensure reproducible results.
-
-    Parameters
-    ----------
-    seed : int, default=1234
-        Seed for random number generators.
-
-    """	
-    random.seed(seed)
-    if np:
-        np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    torch.backends.cudnn.deterministic = True
 
 
 def as_tensor(input, dtype=None, device=None):
@@ -299,16 +282,19 @@ def shiftdim(x, n=None):
     return x
 
 
-def fast_movedim(input, source, destination):
-    """Move the position of exactly one dimension"""
-    dim = input.dim()
+if hasattr(torch, 'movedim'):
+    fast_movedim = torch.movedim
+else:
+    def fast_movedim(input, source, destination):
+        """Move the position of exactly one dimension"""
+        dim = input.dim()
 
-    source = dim + source if source < 0 else source
-    destination = dim + destination if destination < 0 else destination
-    permutation = list(range(dim))
-    del permutation[source]
-    permutation.insert(destination, source)
-    return input.permute(*permutation)
+        source = dim + source if source < 0 else source
+        destination = dim + destination if destination < 0 else destination
+        permutation = list(range(dim))
+        del permutation[source]
+        permutation.insert(destination, source)
+        return input.permute(*permutation)
 
 
 def movedim(input, source, destination):
@@ -695,6 +681,40 @@ def same_storage(x, y):
     # type: (torch.Tensor, torch.Tensor) -> bool
     """Return true if `x` and `y` share the same underlying storage."""
     return x.storage().data_ptr() == y.storage().data_ptr()
+
+
+def all_resident_tensors(no_duplicates=True):
+    """Return all tensors currently allocated"""
+    import gc
+    objs = []
+
+    def already_in(x):
+        for i, obj in enumerate(objs):
+            if same_storage(obj, x):
+                if x.numel() > obj.numel():
+                    del objs[i]
+                    return False
+                return True
+        return False
+
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj):
+                if not (no_duplicates and already_in(obj)):
+                    objs.append(obj)
+                if (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                    if not already_in(obj.data):
+                        objs.append(obj.data)
+        except:
+            pass
+
+    return objs
+
+
+def print_all_resident_tensors(no_duplicates=True):
+    """Print all tensors currently allocated"""
+    for obj in all_resident_tensors(no_duplicates):
+        print(type(obj), obj.shape)
 
 
 def broadcast_backward(input, shape):
@@ -1193,6 +1213,9 @@ def channel2last(tensor):
 
     . Channel ordering is: (Batch, Channel, X, Y, Z)
     . Last ordering is: (Batch, X, Y, Z, Channel))
+
+    /!\ This function changes the *shape* of the tensor but
+    does not change its *memory layout* (no reallocation).
     """
     tensor = torch.as_tensor(tensor)
     tensor = tensor.permute((0,) + tuple(range(2, tensor.dim())) + (1,))
@@ -1204,10 +1227,61 @@ def last2channel(tensor):
 
     . Channel ordering is: (Batch, Channel, X, Y, Z)
     . Last ordering is: (Batch, X, Y, Z, Channel))
+
+    /!\ This function changes the *shape* of the tensor but
+    does not change its *memory layout* (no reallocation).
     """
     tensor = torch.as_tensor(tensor)
     tensor = tensor.permute((0, - 1) + tuple(range(1, tensor.dim()-1)))
     return tensor
+
+
+def ensure_channel_last(x, dim=1):
+    """Ensure that the channel dimension is the most rapidly changing one
+
+    /!\ This function does not change the *shape* of the tensor but
+    may change its *memory layout*.
+
+    Parameters
+    ----------
+    x : tensor
+        Input tensor
+    dim : int, default=1
+        Index of the channel dimension
+
+    Returns
+    -------
+    x : tensor
+        Tensor where dimension `dim` has stride 1
+
+    """
+    strides = x.strides()
+    if strides[dim] != 1:
+        x = movedim(x, dim, -1)
+        x = x.to(memory_format=torch.contiguous_format)
+        x = movedim(x, -1, dim)
+    return x
+
+
+def ensure_contiguous(x):
+    """Ensure that the tensor is contiguous, with the most rapidly
+    changing dimension on the right.
+
+    /!\ This function does not change the *shape* of the tensor but
+    may change its *memory layout*.
+
+    Parameters
+    ----------
+    x : tensor
+        Input tensor
+
+    Returns
+    -------
+    x : tensor
+        Tensor with a contiguous layout
+
+    """
+    return x.to(memory_format=torch.contiguous_format)
 
 
 def isin(tensor, labels):
@@ -2042,3 +2116,105 @@ class benchmark:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         torch.backends.cudnn.benchmark = self.prev_value
+
+
+@contextlib.contextmanager
+def reproducible(seed=1234, enabled=True, devices=None):
+    """Context manager for a reproducible environment
+
+    Parameters
+    ----------
+    seed : int, default=1234
+        Initial seed to use in all forked RNGs
+    enabled : bool, default=True
+        Set to False to disable the context manager
+    devices : [list of] int or str or torch.device, optional
+        CUDA devices. All devices are forked by default.
+
+    Example
+    -------
+    ```python
+    from nitorch.core.utils import reproducible
+    with reproducible():
+        train_my_model(model)
+    ```
+
+    """
+    if not enabled:
+        yield
+        return
+
+    # save initial states
+    py_state = random.getstate()
+    py_hash_seed = os.environ.get('PYTHONHASHSEED', None)
+    cudnn = torch.backends.cudnn.deterministic
+    cpu_state = torch.random.get_rng_state()
+    devices = py.make_list(devices or [])
+    devices = [torch.device(device) for device in devices
+               if torch.device(device).type == 'cuda']
+    cuda_state = [torch.cuda.get_rng_state(device) for device in devices]
+    np_state = np.random.get_state() if np else None
+
+    try:  # fork states
+        random.seed(seed)
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.random.manual_seed(seed)
+        if np:
+            np.random.seed(seed)
+        yield
+
+    finally:   # reset initial states
+        random.setstate(py_state)
+        if 'PYTHONHASHSEED' in os.environ:
+            if py_hash_seed is not None:
+                os.environ['PYTHONHASHSEED'] = py_hash_seed
+            else:
+                del os.environ['PYTHONHASHSEED']
+        torch.backends.cudnn.deterministic = cudnn
+        torch.random.set_rng_state(cpu_state)
+        for device, state in zip(devices, cuda_state):
+            torch.cuda.set_rng_state(state, device)
+        if np:
+            np.random.set_state(np_state)
+
+
+def manual_seed_all(seed=1234):
+    """Set all possible random seeds to a fixed value"""
+    if np:
+        np.random.seed(seed)
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.random.manual_seed(seed)
+
+
+if torch_version('>=', (1, 10)):
+    @torch.jit.script
+    def meshgrid_script_ij(x: List[torch.Tensor]) -> List[Tensor]:
+        return torch.meshgrid(x, indexing='ij')
+    @torch.jit.script
+    def meshgrid_script_xy(x: List[torch.Tensor]) -> List[Tensor]:
+        return torch.meshgrid(x, indexing='xy')
+    meshgrid_ij = lambda *x: torch.meshgrid(*x, indexing='ij')
+    meshgrid_xy = lambda *x: torch.meshgrid(*x, indexing='xy')
+else:
+    @torch.jit.script
+    def meshgrid_script_ij(x: List[torch.Tensor]) -> List[Tensor]:
+        return torch.meshgrid(x)
+    @torch.jit.script
+    def meshgrid_script_xy(x: List[torch.Tensor]) -> List[Tensor]:
+        grid = torch.meshgrid(x)
+        if len(grid) > 1:
+            grid[0] = grid[0].transpose(0, 1)
+            grid[1] = grid[1].transpose(0, 1)
+        return grid
+    meshgrid_ij = lambda *x: torch.meshgrid(*x)
+    def meshgrid_xy(*x):
+        grid = list(torch.meshgrid(*x))
+        if len(grid) > 1:
+            grid[0] = grid[0].transpose(0, 1)
+            grid[1] = grid[1].transpose(0, 1)
+        return grid
+
+

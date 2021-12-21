@@ -9,7 +9,9 @@ from .distribution import _get_dist
 
 __all__ = ['RandomVelocity', 'RandomDiffeo', 'RandomAffineMatrix', 'RandomGrid',
            'RandomDeform', 'RandomPatch', 'RandomFlip', 'RandomSmooth',
-           'RandomLowRes2D', 'RandomLowRes3D', 'RandomRubiks', 'RandomPatchSwap']
+           'RandomLowRes2D', 'RandomLowRes3D', 'RandomRubiks', 'RandomPatchSwap',
+           'RandomInpaint', 'HyperRandomRubiks', 'HyperRandomPatchSwap',
+           'HyperRandomInpaint']
 
 
 defaults = dict(
@@ -818,9 +820,62 @@ class RandomRubiks(Module):
     def forward(self, x):
         shape = x.shape[2:]
         dim = len(shape)
+        pshape = [x+(k-x%k) for x,k in zip(shape,self.kernel)]
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
         x = utils.unfold(x, self.kernel, collapse=True)
         x = x[:, :, torch.randperm(x.shape[2])]
-        x = utils.fold(x, dim=dim, stride=self.kernel, collapsed=True, shape=shape)
+        x = utils.fold(x, dim=dim, stride=self.kernel, collapsed=True, shape=pshape)
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
+        return x
+
+
+class HyperRandomRubiks(Module):
+    """
+    Shuffle image by cube/squares to re-organise as a self-supervised pretraining task.
+    Also works for anisotropic data with non-regular block shapes.
+
+    References
+    ----------
+    ..[1] "Revisiting Rubik's Cube: Self-supervised Learning with 
+            Volume-wise Transformation for 3D Medical Image Segmentation"
+            Xing Tao, Yuexiang Li, Wenhui Zhou, Kai Ma, Yefeng Zheng
+            MICCAI 2020
+            https://arxiv.org/abs/2007.08826
+
+            
+    """
+    def __init__(self,
+                 kernel='normal',
+                 kernel_exp=32,
+                 kernel_scale=16):
+        """
+        Arguments:
+            kernel (int or sequence[int]): Kernel size for blocks to shuffle. Can be
+                single int (isotropic) or specified in all dimensions. Default = [32,32,32]
+        """
+        
+        super().__init__()
+        self.kernel = _get_dist(kernel)
+        self.kernel_exp = kernel_exp
+        self.kernel_scale = kernel_scale
+
+    def forward(self, x):
+        dim = x.dim() - 2
+        backend = utils.backend(x)
+        kernel_exp = utils.make_vector(self.kernel_exp, dim,
+                                           **backend)
+        kernel_scale = utils.make_vector(self.kernel_scale, dim,
+                                             **backend)
+
+        kernel = [self.kernel(k_e, k_s).sample() for k_e,k_s in zip(kernel_exp, kernel_scale)]
+        shape = x.shape[2:]
+        kernel = [torch.clamp(k, min=4, max=shape[i]).int().item() for i,k in enumerate(kernel)]
+        pshape = [x+(k-x%k) for x,k in zip(shape,kernel)]
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
+        x = utils.unfold(x, kernel, collapse=True)
+        x = x[:, :, torch.randperm(x.shape[2])]
+        x = utils.fold(x, dim=dim, stride=kernel, collapsed=True, shape=pshape)
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
         return x
 
 
@@ -858,9 +913,159 @@ class RandomPatchSwap(Module):
     def forward(self, x):
         shape = x.shape[2:]
         dim = len(shape)
+        pshape = [x+(k-x%k) for x,k in zip(shape,self.kernel)]
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
         x = utils.unfold(x, self.kernel, collapse=True)
         for n in range(self.nb_swap):
             i1, i2 = torch.randint(low=0, high=x.shape[2]-1, size=(2,)).tolist()
             x[:,:,i1], x[:,:,i2] = x[:,:,i2], x[:,:,i1]
-        x = utils.fold(x, dim=dim, stride=self.kernel, collapsed=True, shape=shape)
+        x = utils.fold(x, dim=dim, stride=self.kernel, collapsed=True, shape=pshape)
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
+        return x
+
+
+class HyperRandomPatchSwap(Module):
+    """
+    Swap random patches in image as self-supervised pretraining task.
+    Also works for anisotropic data with non-regular block shapes.
+
+    References
+    ----------
+    ..[1] "Self-supervised learning for medical image analysis using image context restoration"
+            Liang Chen, Paul Bentley, Kensaku Mori, Kazunari Misawa, Michitaka Fujiwara, Daniel Rueckert
+            Medical Image Analysis 2019
+            https://doi.org/10.1016/j.media.2019.101539
+
+            
+    """
+    def __init__(self,
+                 kernel='normal',
+                 kernel_exp=32,
+                 kernel_scale=16,
+                 nb_swap=4):
+        """
+        Arguments:
+            kernel (int or sequence[int]): Kernel size for blocks to shuffle. Can be
+                single int (isotropic) or specified in all dimensions. Default = [32,32,32]
+            nb_swap (int): Number of times to swap two random patches. Default = 4
+        """
+        
+        super().__init__()
+        self.kernel = _get_dist(kernel)
+        self.kernel_exp = kernel_exp
+        self.kernel_scale = kernel_scale
+        self.nb_swap = nb_swap
+
+    def forward(self, x):
+        dim = x.dim() - 2
+        backend = utils.backend(x)
+        kernel_exp = utils.make_vector(self.kernel_exp, dim,
+                                           **backend)
+        kernel_scale = utils.make_vector(self.kernel_scale, dim,
+                                             **backend)
+
+        kernel = [self.kernel(k_e, k_s).sample() for k_e,k_s in zip(kernel_exp, kernel_scale)]
+        shape = x.shape[2:]
+        kernel = [torch.clamp(k, min=4, max=shape[i]).int().item() for i,k in enumerate(kernel)]
+        pshape = [x+(k-x%k) for x,k in zip(shape,kernel)]
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
+        x = utils.unfold(x, kernel, collapse=True)
+        for n in range(self.nb_swap):
+            i1, i2 = torch.randint(low=0, high=x.shape[2]-1, size=(2,)).tolist()
+            x[:,:,i1], x[:,:,i2] = x[:,:,i2], x[:,:,i1]
+        x = utils.fold(x, dim=dim, stride=kernel, collapsed=True, shape=pshape)
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
+        return x
+
+
+class RandomInpaint(Module):
+    """
+    Set random patches to zero in image as self-supervised pretraining task.
+    Also works for anisotropic data with non-regular block shapes.
+    TODO: Allow custom mask input to generate random shapes with e.g. spline or topology descriptions.
+
+    References
+    ----------
+    ..[1] 
+
+            
+    """
+    def __init__(self,
+                 dim,
+                 kernel=[32,32,32],
+                 nb_drop=4):
+        """
+        Arguments:
+            kernel (int or sequence[int]): Kernel size for blocks to shuffle. Can be
+                single int (isotropic) or specified in all dimensions. Default = [32,32,32]
+            nb_swap (int): Number of times to swap two random patches. Default = 4
+        """
+        
+        super().__init__()
+        if isinstance(kernel, int):
+            kernel = [kernel] * dim
+        self.kernel = kernel
+        self.nb_drop = nb_drop
+
+    def forward(self, x):
+        shape = x.shape[2:]
+        dim = len(shape)
+        pshape = [x+(k-x%k) for x,k in zip(shape,self.kernel)]
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
+        for n in range(self.nb_drop):
+            x = utils.unfold(x, self.kernel, collapse=True)
+            i1 = torch.randint(low=0, high=x.shape[2]-1, size=(1,)).item()
+            x[:,:,i1] = 0
+            x = utils.fold(x, dim=dim, stride=self.kernel, collapsed=True, shape=pshape)
+        x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
+        return x
+
+
+class HyperRandomInpaint(Module):
+    """
+    Set random patches to zero in image as self-supervised pretraining task.
+    Also works for anisotropic data with non-regular block shapes.
+    TODO: Allow custom mask input to generate random shapes with e.g. spline or topology descriptions.
+
+    References
+    ----------
+    ..[1] 
+
+            
+    """
+    def __init__(self,
+                 kernel='normal',
+                 kernel_exp=32,
+                 kernel_scale=16,
+                 nb_drop=4):
+        """
+        Arguments:
+            kernel (int or sequence[int]): Kernel size for blocks to shuffle. Can be
+                single int (isotropic) or specified in all dimensions. Default = [32,32,32]
+            nb_swap (int): Number of times to swap two random patches. Default = 4
+        """
+        
+        super().__init__()
+        self.kernel = _get_dist(kernel)
+        self.kernel_exp = kernel_exp
+        self.kernel_scale = kernel_scale
+        self.nb_drop = nb_drop
+
+    def forward(self, x):
+        dim = x.dim() - 2
+        backend = utils.backend(x)
+        kernel_exp = utils.make_vector(self.kernel_exp, dim, **backend)
+        kernel_scale = utils.make_vector(self.kernel_scale, dim, **backend)
+
+        shape = x.shape[2:]
+        for n in range(self.nb_drop):
+            kernel = [self.kernel(k_e, k_s).sample() for k_e,k_s in zip(kernel_exp, kernel_scale)]
+            kernel = [torch.clamp(k, min=4, max=shape[i]).int().item() for i,k in enumerate(kernel)]
+            pshape = [x+(k-x%k) for x,k in zip(shape,kernel)]
+            x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(pshape))
+            x = utils.unfold(x, kernel, collapse=True)
+            i1 = torch.randint(low=0, high=x.shape[2]-1, size=(1,)).item()
+            x[:,:,i1] = 0
+            x = utils.fold(x, dim=dim, stride=kernel, collapsed=True, shape=pshape)
+            x = utils.ensure_shape(x, (x.shape[0],x.shape[1],) + tuple(shape))
         return x

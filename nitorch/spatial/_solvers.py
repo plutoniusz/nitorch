@@ -40,6 +40,7 @@ All functions are implemented in a "field" (for vector fields) or "grid"
 
 import torch
 import math
+import gc
 from nitorch.core import utils, py
 from nitorch.core import optim as optimizers
 from nitorch.core.linalg import sym_matvec, sym_solve
@@ -61,7 +62,7 @@ from ._spconv import spconv
 # ======================================================================
 
 
-def prolong(x, shape=None, bound='dct2', order=2, dim=None):
+def prolong(x, shape=None, bound='dct2', order=2, dim=None, grid=None):
     """Prolongation of a tensor to a finer grid.
     
     Uses the pulling operator (2nd order by default).
@@ -80,22 +81,25 @@ def prolong(x, shape=None, bound='dct2', order=2, dim=None):
     y : (..., *out_spatial, K) tensor
     
     """
-    backend = utils.backend(x)
+    if not x.dtype.is_floating_point:
+        x = x.to(torch.get_default_dtype())
     dim = dim or (x.dim() - 1)
-    in_spatial = x.shape[-dim-1:-1]
-    out_spatial = shape or [2*s for s in in_spatial]
-    shifts = [0.5 * (inshp / outshp - 1)
-              for inshp, outshp in zip(in_spatial, out_spatial)]
-    grid = [torch.arange(0., outshp, **backend).mul_(inshp/outshp).add_(shift)
-            for inshp, outshp, shift in zip(in_spatial, out_spatial, shifts)]
-    grid = torch.stack(torch.meshgrid(*grid), dim=-1)
+    if grid is None:
+        backend = utils.backend(x)
+        in_spatial = x.shape[-dim-1:-1]
+        out_spatial = shape or [2*s for s in in_spatial]
+        shifts = [0.5 * (inshp / outshp - 1)
+                  for inshp, outshp in zip(in_spatial, out_spatial)]
+        grid = [torch.arange(0., outshp, **backend).mul_(inshp/outshp).add_(shift)
+                for inshp, outshp, shift in zip(in_spatial, out_spatial, shifts)]
+        grid = torch.stack(torch.meshgrid(*grid), dim=-1)
     x = utils.fast_movedim(x, -1, -dim-1)
     x = grid_pull(x, grid, bound=bound, interpolation=order, extrapolate=True)
     x = utils.fast_movedim(x, -dim-1, -1)
     return x
-    
-    
-def restrict(x, shape=None, bound='dct2', order=1, dim=None):
+
+
+def restrict(x, shape=None, bound='dct2', order=1, dim=None, grid=None):
     """Restriction of a tensor to a coarser grid.
     
     Uses the pushing operator (1st order by default).
@@ -114,15 +118,18 @@ def restrict(x, shape=None, bound='dct2', order=1, dim=None):
     y : (..., *out_spatial, K) tensor
     
     """
-    backend = utils.backend(x)
+    if not x.dtype.is_floating_point:
+        x = x.to(torch.get_default_dtype())
     dim = dim or (x.dim() - 1)
     out_spatial = x.shape[-dim-1:-1]
     in_spatial = shape or [math.ceil(s/2) for s in out_spatial]
-    shifts = [0.5 * (inshp / outshp - 1)
-              for inshp, outshp in zip(in_spatial, out_spatial)]
-    grid = [torch.arange(0., outshp, **backend).mul_(inshp/outshp).add_(shift)
-            for inshp, outshp, shift in zip(in_spatial, out_spatial, shifts)]
-    grid = torch.stack(torch.meshgrid(*grid), dim=-1)
+    if grid is None:
+        backend = utils.backend(x)
+        shifts = [0.5 * (inshp / outshp - 1)
+                  for inshp, outshp in zip(in_spatial, out_spatial)]
+        grid = [torch.arange(0., outshp, **backend).mul_(inshp/outshp).add_(shift)
+                for inshp, outshp, shift in zip(in_spatial, out_spatial, shifts)]
+        grid = torch.stack(torch.meshgrid(*grid), dim=-1)
     x = utils.fast_movedim(x, -1, -dim-1)
     x = grid_push(x, grid, in_spatial, bound=bound, interpolation=order,
                   extrapolate=True)
@@ -133,11 +140,25 @@ def restrict(x, shape=None, bound='dct2', order=1, dim=None):
     return x
 
 
+def make_grid(highshape=None, lowshape=None, **backend):
+    if highshape is None:
+        highshape = [2 * s for s in lowshape]
+    elif lowshape is None:
+        lowshape = [math.ceil(s / 2) for s in highshape]
+    shifts = [0.5 * (lowshp / highshp - 1)
+              for lowshp, highshp in zip(lowshape, highshape)]
+    grid = [
+        torch.arange(0., highshp, **backend).mul_(lowshp / highshp).add_(shift)
+        for lowshp, highshp, shift in zip(lowshape, highshape, shifts)]
+    grid = torch.stack(torch.meshgrid(*grid), dim=-1)
+    return grid
+
+
 class _FMG:
     """Base class for multi-grid solvers"""
 
     def __init__(self, bound='dct2', nb_cycles=2, nb_iter=2, max_levels=16,
-                 optim='cg', tolerance=0, stop='e', verbose=False,
+                 pool=2, optim='cg', tolerance=0, stop='max_gain', verbose=False,
                  matvec=None, matsolve=None, matdiag=None):
         self.bound = bound
         self.nb_cycles = nb_cycles
@@ -147,6 +168,7 @@ class _FMG:
         self.optim = optim
         self.tolerance = tolerance
         self.stop = stop
+        self.pool = pool
 
         # These function understand how sparse Hessians are stored.
         # By default, they suit sparse Hessian where the diagonal is
@@ -174,11 +196,11 @@ class _FMG:
     def pullopt(self):
         return dict(bound=self.bound, dim=self.dim)
 
-    def prolong(self, x, shape):
-        return prolong(x, shape, bound=self.bound, dim=self.dim)
+    def prolong(self, x, grid, shape):
+        return prolong(x, shape, bound=self.bound, dim=self.dim, grid=grid)
 
-    def restrict(self, x, shape):
-        return restrict(x, shape, bound=self.bound, dim=self.dim)
+    def restrict(self, x, grid, shape):
+        return restrict(x, shape, bound=self.bound, dim=self.dim, grid=grid)
 
     prolong_h = prolong
     prolong_g = prolong
@@ -197,6 +219,8 @@ class _FMG:
         if init_zero:
             self.init = torch.zeros_like(self.gradient)
 
+        backend = utils.backend(self.gradient)
+        pyrt = []                      # transformations for restrict/prolong
         pyrh = [self.hessian]          # hessians / matrix
         pyrg = [self.gradient]         # gradients / target
         pyrx = [self.init]             # solutions
@@ -206,23 +230,24 @@ class _FMG:
         for i in range(1, self.max_levels+1):
             self.trace(f'(fmg) - prolong [{i - 1} -> {i}]')
 
-            spatial1 = [math.ceil(s/2) for s in pyrn[-1]]
+            spatial1 = [math.ceil(s/self.pool) for s in pyrn[-1]]
             if all(s == 1 for s in spatial1):
                 break
+            pyrt.append(make_grid(pyrn[-1], spatial1, **backend))
             pyrn.append(spatial1)
             pyrv.append([n0/n for n, n0 in zip(spatial1, pyrn[0])])
-            pyrh.append(self.restrict_h(pyrh[-1], spatial1))
-            pyrg.append(self.restrict_g(pyrg[-1], spatial1))
+            pyrh.append(self.restrict_h(pyrh[-1], pyrt[-1], spatial1))
+            pyrg.append(self.restrict_g(pyrg[-1], pyrt[-1], spatial1))
             if init_zero:
                 pyrx.append(torch.zeros_like(pyrg[-1]))
             else:
-                pyrx.append(self.restrict_g(pyrx[-1], spatial1))
+                pyrx.append(self.restrict_g(pyrx[-1], pyrt[-1], spatial1))
             if isinstance(self.weights, dict):
-                pyrw.append({key: self.restrict_w(val, spatial1)
+                pyrw.append({key: self.restrict_w(val, pyrt[-1], spatial1)
                              if val is not None else None
                              for key, val in pyrw[-1].items()})
             elif self.weights is not None:
-                pyrw.append(self.restrict_w(pyrw[-1], spatial1))
+                pyrw.append(self.restrict_w(pyrw[-1], pyrt[-1], spatial1))
             else:
                 pyrw.append(None)
 
@@ -232,6 +257,7 @@ class _FMG:
         self.pyrw = pyrw
         self.pyrn = pyrn
         self.pyrv = pyrv
+        self.pyrt = pyrt
 
     def trace(self, *a, **k):
         if self.verbose:
@@ -244,6 +270,7 @@ class _FMG:
         d = self.pyrn       # shape
         h = self.forward    # full hessian (H + L)
         ih = self.solvers   # inverse of the hessian:  ih(g, x) <=> x = h\g
+        t = self.pyrt       # restrict/prolong transforms
 
         # Initial solution at coarsest grid
         self.trace(f'(fmg) solve [{self.nb_levels - 1}]')
@@ -255,7 +282,7 @@ class _FMG:
 
         for n_base in reversed(range(self.nb_levels-1)):
             self.trace(f'(fmg) prolong to level [{n_base + 1} -> {n_base}]')
-            x[n_base] = self.prolong_g(x[n_base+1], d[n_base])
+            x[n_base] = self.prolong_g(x[n_base+1], t[n_base], d[n_base])
 
             for n_cycle in range(self.nb_cycles):
                 self.trace(f'(fmg) - V cycle {n_cycle}')
@@ -264,7 +291,7 @@ class _FMG:
                     x[n] = ih[n](g[n], x[n])
                     res = h[n](x[n]).neg_().add_(g[n])
                     self.trace(f'(fmg) -- restrict residuals [{n} -> {n + 1}]')
-                    g[n+1] = self.restrict_g(res, d[n+1])
+                    g[n+1] = self.restrict_g(res, t[n], d[n+1])
                     del res
                     x[n+1].zero_()
 
@@ -273,7 +300,7 @@ class _FMG:
 
                 for n in reversed(range(n_base, self.nb_levels-1)):
                     self.trace(f'(fmg) -- prolong residuals [{n + 1} -> {n}]')
-                    x[n] += self.prolong_g(x[n+1], d[n])
+                    x[n] += self.prolong_g(x[n+1], t[n], d[n])
                     self.trace(f'(fmg) -- solve full [{n}]')
                     x[n] = ih[n](g[n], x[n])
 
@@ -282,7 +309,8 @@ class _FMG:
         return x
 
     def clear_data(self):
-        self.pyrh = self.pyrg = self.pyrx = self.pyrw = self.pyrn = self.pyrv = []
+        self.pyrh = self.pyrg = self.pyrx = self.pyrw = []
+        self.pyrn = self.pyrv = self.pyrt = []
         self.hessian = self.gradient = self.weights = self.init = None
         if hasattr(self, '_optim'):
             self.optim = self._optim
@@ -587,17 +615,19 @@ class _GridFMG(_FMG):
         self.factor = factor
         self.voxel_size = voxel_size
 
-    def prolong_g(self, x, shape):
+    def prolong_g(self, x, grid, shape):
         shape0 = x.shape[-self.dim-1:-1]
         scale = [s/s0 for s0, s in zip(shape0, shape)]
         scale = torch.as_tensor(scale, **utils.backend(x))
-        return prolong(x, shape, bound=self.bound, dim=self.dim).mul_(scale)
+        x = prolong(x, shape, bound=self.bound, dim=self.dim, grid=grid)
+        x = x.mul_(scale)
+        return x
 
-    def prolong_h(self, x, shape):
+    def prolong_h(self, x, grid, shape):
         shape0 = x.shape[-self.dim-1:-1]
         scale = [s/s0 for s0, s in zip(shape0, shape)]
         scale = torch.as_tensor(scale, **utils.backend(x))
-        x = prolong(x, shape, bound=self.bound, dim=self.dim)
+        x = prolong(x, shape, bound=self.bound, dim=self.dim, grid=grid)
         x[..., :self.dim].mul_(scale.square())
         c = 0
         for i in range(self.dim):
@@ -606,17 +636,19 @@ class _GridFMG(_FMG):
                 c = c + 1
         return x
 
-    def restrict_g(self, x, shape):
+    def restrict_g(self, x, grid, shape):
         shape0 = x.shape[-self.dim-1:-1]
         scale = [s0/s for s0, s in zip(shape0, shape)]
         scale = torch.as_tensor(scale, **utils.backend(x))
-        return restrict(x, shape, bound=self.bound, dim=self.dim).mul_(scale)
+        x = restrict(x, shape, bound=self.bound, dim=self.dim, grid=grid)
+        x = x.mul_(scale)
+        return x
 
-    def restrict_h(self, x, shape):
+    def restrict_h(self, x, grid, shape):
         shape0 = x.shape[-self.dim-1:-1]
         scale = [s0/s for s0, s in zip(shape0, shape)]
         scale = torch.as_tensor(scale, **utils.backend(x))
-        x = restrict(x, shape, bound=self.bound, dim=self.dim)
+        x = restrict(x, shape, bound=self.bound, dim=self.dim, grid=grid)
         x[..., :self.dim].mul_(scale.square())
         c = 0
         for i in range(self.dim):
@@ -863,7 +895,7 @@ class _GridFMG(_FMG):
 
 def solve_grid_fmg(hessian, gradient, absolute=0, membrane=0, bending=0,
                    lame=0, factor=1, voxel_size=1, bound='dft', weights=None,
-                   optim='cg', nb_cycles=2, nb_iter=2, tolerance=0,
+                   optim='cg', nb_cycles=2, nb_iter=2, tolerance=0, pool=2,
                    verbose=False):
     """Solve a positive-definite linear system of the form (H + L)v = g
 
@@ -897,6 +929,7 @@ def solve_grid_fmg(hessian, gradient, absolute=0, membrane=0, bending=0,
     nb_cycles : int, default=2
     nb_iter : int, default=2
     tolerance : float, default=0
+    pool : int, default=2
     verbose : int, default=0
 
     Returns
@@ -911,15 +944,19 @@ def solve_grid_fmg(hessian, gradient, absolute=0, membrane=0, bending=0,
 
     FMG = _GridFMG(absolute=absolute, membrane=membrane, bending=bending,
                    lame=lame, factor=factor, voxel_size=voxel_size,
-                   bound=bound, optim=optim, nb_cycles=nb_cycles,
+                   bound=bound, optim=optim, nb_cycles=nb_cycles, pool=pool,
                    nb_iter=nb_iter, verbose=verbose, tolerance=tolerance)
     FMG.set_data(hessian, gradient, weights=weights)
-    return FMG.solve()
+    result = FMG.solve()
+    # FMG allocates a lot of objects: better to force garbage collection
+    del FMG, gradient, hessian, weights
+    gc.collect()
+    return result
 
 
 def solve_field_fmg(hessian, gradient, weights=None, voxel_size=1, bound='dct2',
                     absolute=0, membrane=0, bending=0, factor=1, dim=None,
-                    optim='cg', nb_cycles=2, nb_iter=2, tolerance=0,
+                    optim='cg', nb_cycles=2, nb_iter=2, tolerance=0, pool=2,
                     verbose=False, matvec=None, matsolve=None, matdiag=None):
     """Solve a positive-definite linear system of the form (H + L)v = g
 
@@ -953,6 +990,7 @@ def solve_field_fmg(hessian, gradient, weights=None, voxel_size=1, bound='dct2',
     nb_cycles : int, default=2
     nb_iter : int, default=2
     tolerance : float, default=1e-5
+    pool : int, default=2
     verbose : int, default=0
 
     Returns
@@ -967,11 +1005,15 @@ def solve_field_fmg(hessian, gradient, weights=None, voxel_size=1, bound='dct2',
 
     FMG = _FieldFMG(absolute=absolute, membrane=membrane, bending=bending,
                     factor=factor, voxel_size=voxel_size,
-                    bound=bound, optim=optim, nb_cycles=nb_cycles,
+                    bound=bound, optim=optim, nb_cycles=nb_cycles, pool=pool,
                     nb_iter=nb_iter, verbose=verbose, tolerance=tolerance,
                     matvec=matvec, matsolve=matsolve, matdiag=matdiag)
     FMG.set_data(hessian, gradient, weights=weights, dim=dim)
-    return FMG.solve()
+    result = FMG.solve()
+    # FMG allocates a lot of objects: better to force garbage collection
+    del FMG, gradient, hessian, weights
+    gc.collect()
+    return result
 
 
 # ======================================================================
@@ -987,7 +1029,7 @@ _bending = bending
 def solve_field(hessian, gradient, weights=None, dim=None,
                 absolute=0, membrane=0, bending=0, factor=1,
                 voxel_size=1, bound='dct2',
-                optim='cg', max_iter=16, tolerance=1e-5, stop='e',
+                optim='cg', max_iter=16, tolerance=1e-5, stop='max_gain',
                 verbose=False, matvec=None, matsolve=None, matdiag=None):
     """Solve a positive-definite linear system of the form (H + L)x = g
 

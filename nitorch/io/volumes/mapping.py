@@ -503,7 +503,6 @@ class MappedArray(MappedFile):
 
         # --- cutoff ---
         dat[present] = volutils.cutoff(dat[present], cutoff, dim)
-        dat[present] = volutils.cutoff(dat[present], cutoff, dim)
 
         # --- cast + rescale ---
         rand = rand and not indtype.is_floating_point
@@ -1172,6 +1171,13 @@ class CatArray(MappedArray):
         new._dim_cat = iperm[new._dim_cat]
         new.shape = tuple(self.shape[d] for d in dims)
         return new
+
+    def flip(self, dim):
+        dim = make_list(dim)
+        slicer = [slice(None)] * self.dim
+        for d in dim:
+            slicer[d] = slice(None, None, -1)
+        return self[tuple(slicer)]
 
     def data(self, *args, **kwargs):
         # read individual arrays and concatenate them

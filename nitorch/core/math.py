@@ -1,6 +1,7 @@
 """Mathematical functions."""
 # mikael.brudfors@gmail.com
 # yael.balbastre@gmail.com
+
 import torch
 import math as pymath
 from typing import List
@@ -8,6 +9,7 @@ from .optionals import custom_fwd, custom_bwd
 from .constants import inf, ninf
 from nitorch.core import py, utils
 Tensor = torch.Tensor
+
 
 def round(t, decimals=0):
     """Round a tensor to the given number of decimals.
@@ -23,6 +25,15 @@ def round(t, decimals=0):
         Rounded tensor.
     """
     return torch.round(t * 10 ** decimals) / (10 ** decimals)
+
+
+if utils.torch_version('>=', (1, 8)):
+    def floor_div(x, y):
+        return torch.div(x, y, rounding_mode='floor')
+else:
+    def floor_div(x, y):
+        return (x / y).floor_()
+
 
 # ======================================================================
 #
@@ -111,10 +122,12 @@ def _reduce_index(fn, input, dim=None, keepdim=False, omitnan=False,
                                  inplace=False, return_indices=return_indices,
                                  out=out)
         return nanfn(self, input, inplace)
+
     input = torch.as_tensor(input)
     if dim is None:
         # If min across the entire tensor -> call torch
         return fn(input)
+
     # compute shapes
     scalar_dim = torch.as_tensor(dim).dim() == 0
     dim = [d if d >= 0 else input.dim() + d for d in py.make_list(dim)]
@@ -124,6 +137,7 @@ def _reduce_index(fn, input, dim=None, keepdim=False, omitnan=False,
     redshape = [shape[d] for d in dim]
     input = utils.movedim(input, dim, -1)    # move reduced dim to the end
     input = input.reshape([*subshape, -1])   # collapse reduced dimensions
+
     # prepare placeholder
     out_val, out_ind = py.make_list(out, 2, default=None)
     if out_ind and len(dim) > 1:
@@ -135,9 +149,12 @@ def _reduce_index(fn, input, dim=None, keepdim=False, omitnan=False,
     elif out_ind_tmp is not None and out_val is None:
         out_val = input.new_empty(subshape)
     out = (out_val, out_ind_tmp) if out_val is not None else None
+
     input, indices = fn(input, dim=-1, out=out)       # perform reduction
+
     if keepdim:
         input = input.reshape(keptshape)  # keep reduced singleton dimensions
+
     if return_indices:
         # convert to (i, j, k) indices
         indices = utils.ind2sub(indices, redshape, out=out_ind)
@@ -147,7 +164,10 @@ def _reduce_index(fn, input, dim=None, keepdim=False, omitnan=False,
         if scalar_dim:
             indices = indices[..., 0]
         return input, indices
+
     return input
+
+
 def max(input, dim=None, keepdim=False, omitnan=False, inplace=False,
         return_indices=False, out=None):
     """Multi-dimensional max reduction.
@@ -188,6 +208,8 @@ def max(input, dim=None, keepdim=False, omitnan=False, inplace=False,
     opt = dict(dim=dim, keepdim=keepdim, omitnan=omitnan, inplace=inplace,
                return_indices=return_indices, out=out)
     return _reduce_index(torch.max, input, **opt, nanfn=_nanmax)
+
+
 def min(input, dim=None, keepdim=False, omitnan=False, inplace=False,
         return_indices=False, out=None):
     """Multi-dimensional min reduction.
@@ -228,6 +250,8 @@ def min(input, dim=None, keepdim=False, omitnan=False, inplace=False,
     opt = dict(dim=dim, keepdim=keepdim, omitnan=omitnan, inplace=inplace,
                return_indices=return_indices, out=out)
     return _reduce_index(torch.min, input, **opt, nanfn=_nanmin)
+
+
 def _nanmax(fn, input, inplace=False):
     """Replace `nan`` with `-inf`"""
     input = torch.as_tensor(input)
@@ -238,6 +262,8 @@ def _nanmax(fn, input, inplace=False):
         val_ninf = torch.as_tensor(ninf, dtype=input.dtype, device=input.device)
         input = torch.where(mask, val_ninf, input)
     return fn(input)
+
+
 def nanmax(input, dim=None, keepdim=False, inplace=False,
            return_indices=False, out=None):
     """Multi-dimensional max reduction, excluding NaNs.
@@ -276,6 +302,8 @@ def nanmax(input, dim=None, keepdim=False, inplace=False,
     opt = dict(dim=dim, keepdim=keepdim, inplace=inplace,
                return_indices=return_indices, out=out)
     return max(input, **opt, omitnan=True)
+
+
 def _nanmin(fn, input, inplace=False):
     """Replace `nan`` with `inf`"""
     input = torch.as_tensor(input)
@@ -286,6 +314,8 @@ def _nanmin(fn, input, inplace=False):
         val_inf = torch.as_tensor(inf, dtype=input.dtype, device=input.device)
         input = torch.where(mask, val_inf, input)
     return fn(input)
+
+
 def nanmin(input, dim=None, keepdim=False, inplace=False,
            return_indices=False, out=None):
     """Multi-dimensional min reduction, excluding NaNs.
@@ -324,6 +354,8 @@ def nanmin(input, dim=None, keepdim=False, inplace=False,
     opt = dict(dim=dim, keepdim=keepdim, inplace=inplace,
                return_indices=return_indices, out=out)
     return min(input, **opt, omitnan=True)
+
+
 def median(input, dim=None, keepdim=False, omitnan=None, inplace=None,
            return_indices=False, out=None):
     """Multi-dimensional median reduction.
@@ -387,6 +419,7 @@ def sum(input, *args, omitnan=False, inplace=False, **kwargs):
     else:
         return torch.sum(input, *args, **kwargs)
 
+
 def nansum(input, *args, inplace=False, **kwargs):
     """Compute the sum of a tensor, excluding nans.
     Parameters
@@ -419,6 +452,7 @@ def nansum(input, *args, inplace=False, **kwargs):
         input.masked_fill_(mask, 0)
     return torch.sum(input, *args, **kwargs)
 
+
 def mean(input, *args, omitnan=False, inplace=False, **kwargs):
     """Compute the mean of a tensor.
     Parameters
@@ -446,6 +480,7 @@ def mean(input, *args, omitnan=False, inplace=False, **kwargs):
         return nanmean(input, *args, inplace=inplace, **kwargs)
     else:
         return torch.mean(input, *args, **kwargs)
+
 
 def nanmean(input, *args, inplace=False, **kwargs):
     """Compute the mean of a tensor, excluding nans.
@@ -481,6 +516,7 @@ def nanmean(input, *args, inplace=False, **kwargs):
     weights = mask.sum(*args, **kwargs).to(kwargs.get('dtype', input.dtype))
     return torch.sum(input, *args, **kwargs) / weights
 
+
 def var(input, *args, omitnan=False, inplace=False, **kwargs):
     """Compute the variance of a tensor, excluding nans.
     Parameters
@@ -508,6 +544,7 @@ def var(input, *args, omitnan=False, inplace=False, **kwargs):
         return nanvar(input, *args, inplace=inplace, **kwargs)
     else:
         return torch.var(input, *args, **kwargs)
+
 
 def nanvar(input, *args, unbiased=True, inplace=False, **kwargs):
     """Compute the variance of a tensor, excluding nans.
@@ -549,6 +586,7 @@ def nanvar(input, *args, unbiased=True, inplace=False, **kwargs):
         var *= weights
     return var
 
+
 def std(input, *args, omitnan=False, inplace=False, **kwargs):
     """Compute the standard deviation of a tensor, excluding nans.
     Parameters
@@ -577,6 +615,7 @@ def std(input, *args, omitnan=False, inplace=False, **kwargs):
     else:
         return torch.std(input, *args, **kwargs)
 
+
 def nanstd(input, *args, unbiased=True, inplace=False, **kwargs):
     """Compute the standard deviation of a tensor, excluding nans.
     Parameters
@@ -601,6 +640,8 @@ def nanstd(input, *args, unbiased=True, inplace=False, **kwargs):
     input = nanvar(input, *args, unbiased=unbiased, inplace=inplace, **kwargs)
     input = input.sqrt_() if not input.requires_grad else input.sqrt()
     return input
+
+
 # ======================================================================
 #
 #                              SIMPLEX
@@ -633,44 +674,60 @@ calls to `log` and `exp`, which must all store their input in order to
 backpropagate, whereas a single tensor needs to be stored to backpropagate 
 through the entire softmax function.
 """
+
+
 def _lse_fwd(input, dim=-1, keepdim=False, implicit=False):
     input = torch.as_tensor(input).clone()
+
     lse = input.max(dim=dim, keepdim=True)[0]
     if implicit:
         zero = input.new_zeros([])
         lse = torch.max(lse, zero)
+
     input = input.sub_(lse).exp_().sum(dim=dim, keepdim=True)
     if implicit:
         input += lse.neg().exp_()
     lse += input.log_()
+
     if not keepdim:
         lse = lse.squeeze(dim=dim)
+
     return lse
+
+
 def _lse_bwd(input, output_grad, dim=-1, keepdim=False, implicit=False):
     input = _softmax_fwd(input, dim, implicit)
     if not keepdim:
         output_grad = output_grad.unsqueeze(dim)
     input *= output_grad
     return input
+
+
 class _LSE(torch.autograd.Function):
     """Log-Sum-Exp with implicit class."""
+
     @staticmethod
     @custom_fwd
     def forward(ctx, input, dim, keepdim, implicit):
+
         # Save precomputed components of the backward pass
         needs_grad = torch.is_tensor(input) and input.requires_grad
         if needs_grad:
             ctx.save_for_backward(input)
             ctx.args = {'dim': dim, 'implicit': implicit, 'keepdim': keepdim}
+
         return _lse_fwd(input, dim=dim, keepdim=keepdim, implicit=implicit)
+
     @staticmethod
     @custom_bwd
     def backward(ctx, output_grad):
+
         input, = ctx.saved_tensors
         return _lse_bwd(input, output_grad,
                         dim=ctx.args['dim'],
                         keepdim=ctx.args['keepdim'],
                         implicit=ctx.args['implicit']), None, None, None
+
 
 def logsumexp(input, dim=-1, keepdim=False, implicit=False):
     """Numerically stabilised log-sum-exp (lse).
@@ -691,6 +748,7 @@ def logsumexp(input, dim=-1, keepdim=False, implicit=False):
     """
     return _LSE.apply(input, dim, keepdim, implicit)
 
+
 def _add_class(x, bg, dim, index):
     # for implicit softmax
     if isinstance(bg, (int, float)):
@@ -708,6 +766,8 @@ def _add_class(x, bg, dim, index):
             bg,
             utils.slice_tensor(x, slice(index, None), dim)]
     return torch.cat(pieces, dim=dim)
+
+
 def _remove_class(x, dim, index):
     # for implicit softmax
     if index in (-1, x.shape[dim]-1):
@@ -719,27 +779,36 @@ def _remove_class(x, dim, index):
             utils.slice_tensor(x, slice(index), dim),
             utils.slice_tensor(x, slice(index+1, None), dim)])
     return x
+
+
 def _softmax_fwd(input, dim=-1, implicit=False, implicit_index=0):
     implicit_in, implicit_out = py.ensure_list(implicit, 2)
+
     maxval, _ = torch.max(input, dim=dim, keepdim=True)
     if implicit_in:
         maxval.clamp_min_(0)  # don't forget the class full of zeros
+
     input = input.clone().sub_(maxval).exp_()
     sumval = torch.sum(input, dim=dim, keepdim=True,
                        out=maxval if not implicit_in else None)
     if implicit_in:
         sumval += maxval.neg().exp_()  # don't forget the class full of zeros
     input /= sumval
+
     if implicit_in and not implicit_out:
         background = input.sum(dim, keepdim=True).neg_().add_(1)
         input = _add_class(input, background, dim, implicit_index)
     elif implicit_out and not implicit_in:
         input = _remove_class(input, dim, implicit_index)
+
     return input
+
+
 def _softmax_bwd(output, output_grad, dim=-1, implicit=False, implicit_index=0):
     implicit = py.ensure_list(implicit, 2)
     add_dim = implicit[1] and not implicit[0]
     drop_dim = implicit[0] and not implicit[1]
+
     grad = output_grad.clone()
     del output_grad
     grad *= output
@@ -751,27 +820,37 @@ def _softmax_bwd(output, output_grad, dim=-1, implicit=False, implicit_index=0):
         grad = _add_class(grad, grad_background, dim, implicit_index)
     elif drop_dim:
         grad = utils.slice_tensor(grad, slice(-1), dim)
+
     return grad
+
+
 class _Softmax(torch.autograd.Function):
     """Softmax with implicit class."""
+
     @staticmethod
     @custom_fwd
     def forward(ctx, input, dim, implicit, implicit_index):
+
         # Save precomputed components of the backward pass
         needs_grad = torch.is_tensor(input) and input.requires_grad
         # Compute matrix exponential
         s = _softmax_fwd(input, dim=dim, implicit=implicit,
                          implicit_index=implicit_index)
+
         if needs_grad:
             ctx.save_for_backward(s)
             ctx.args = {'dim': dim, 'implicit': implicit}
+
         return s
+
     @staticmethod
     @custom_bwd
     def backward(ctx, output_grad):
+
         s, = ctx.saved_tensors
         return _softmax_bwd(s, output_grad,  dim=ctx.args['dim'],
                             implicit=ctx.args['implicit']), None, None, None
+
 
 def logit(input, dim=-1, implicit=False, implicit_index=0):
     """(Multiclass) logit function
@@ -820,6 +899,7 @@ def logit(input, dim=-1, implicit=False, implicit_index=0):
     if implicit[0] and not implicit[1]:
         input = _add_class(input, 0, dim, implicit_index)
     return input
+
 
 def softmax(input, dim=-1, implicit=False, implicit_index=0):
     """ SoftMax (safe).
@@ -880,7 +960,8 @@ def log_softmax(input, dim=-1, implicit=False, implicit_index=0):
         output = input - lse
     return output
 
-def softmax_lse(input, dim=-1, lse=False, weights=None, implicit=False):
+
+def softmax_lse(input, dim=-1, lse=False, weights=None, implicit=False,):
     """ SoftMax (safe).
     Parameters
     ----------
@@ -909,16 +990,20 @@ def softmax_lse(input, dim=-1, lse=False, weights=None, implicit=False):
             return torch.sum(x, *a, **k)
         else:
             return torch.sum(x, *a, **k, out=out)
+
     implicit_in, implicit_out = py.make_list(implicit, 2)
+
     maxval, _ = torch.max(input, dim=dim, keepdim=True)
     if implicit_in:
         maxval.clamp_min_(0)  # don't forget the class full of zeros
+
     input = (input-maxval).exp()
     sumval = sumto(input, dim=dim, keepdim=True,
                    out=maxval if not lse else None)
     if implicit_in:
         sumval += maxval.neg().exp()  # don't forget the class full of zeros
     input = input / sumval
+
     if lse:
         # Compute log-sum-exp
         #   maxval = max(logit)
@@ -929,24 +1014,130 @@ def softmax_lse(input, dim=-1, lse=False, weights=None, implicit=False):
         sumval = sumval.log()
         maxval += sumval
         if weights is not None:
-            maxval = maxval * weights
+            maxval *= weights
         maxval = maxval.sum(dtype=torch.float64)
     else:
         maxval = None
+
     if implicit_in and not implicit_out:
         background = input.sum(dim, keepdim=True).neg().add(1)
         input = torch.cat((input, background), dim=dim)
     elif implicit_out and not implicit_in:
         input = utils.slice_tensor(input, slice(-1), dim)
+
     if lse:
         return input, maxval
     else:
         return input
+
+
+def softsort(x, tau=1, hard=False, descending=False, apply=False, pow=1):
+    """SoftSort of a vector
+    Parameters
+    ----------
+    x : (..., K) tensor
+    tau : float, default=1
+        Temperature
+    hard : bool, default=False
+        Perform (hard) sort based on the softsort
+        (similar to applying argmax to a softmax)
+    descending : bool, default=False
+        Sort in descending order
+    apply : bool, default=False
+        Return the soft-sorted vector insteas of the sort-sorting weights
+    pow : float, default=1
+        Power of the norm
+    Returns
+    -------
+    P : (..., K, K) tensor /or/ x : (..., K) if `apply`
+        Soft sorting weights, normalized across the last dimension.
+        /or/
+        Sort-sorted input vector: `matvec(P, x)`
+    References
+    ----------
+    .. [1] "SoftSort: A Continuous Relaxation for the argsort Operator"
+           Sebastian Prillo & Julian Martin Eisenschlos
+           ICML (2020)
+           https://arxiv.org/abs/2006.16038
+           https://github.com/sprillo/softsort (MIT license)
+    """
+    norm = ((lambda x: x.abs_()) if pow == 1 else
+            (lambda x: x.square()) if pow == 2 else
+            (lambda x: x.abs_().pow(pow)))
+
+    x = x.unsqueeze(-1)
+    sorted = x.sort(descending=True, dim=-2).values
+    pairwise_diff = norm(sorted - x.transpose(-1, -2)).div_(-tau)
+    P_hat = softmax(pairwise_diff, -1)
+
+    if hard:
+        P = torch.zeros_like(P_hat)
+        P.scatter_(-1, torch.topk(P_hat, 1, -1).values, value=1)
+        P_hat += P.sub_(P_hat).detach()
+    if descending:
+        P_hat = P_hat.flip(-2)
+    if apply:
+        return P_hat.matmul(x).squeeze(-1)
+    return P_hat
+
+
+def neuralsort(x, tau=1, hard=False, descending=False, apply=False):
+    """SoftSort of a vector
+    Parameters
+    ----------
+    x : (..., K) tensor
+    tau : float, default=1
+        Temperature
+    hard : bool, default=False
+        Perform (hard) sort based on the softsort
+        (similar to applying argmax to a softmax)
+    descending : bool, default=False
+        Sort in descending order
+    apply : bool, default=False
+        Return the soft-sorted vector insteas of the sort-sorting weights
+    Returns
+    -------
+    P : (..., K, K) tensor /or/ x : (..., K) if `apply`
+        Soft sorting weights, normalized across the last dimension.
+        /or/
+        Sort-sorted input vector: `matvec(P, x)`
+    References
+    ----------
+    .. [1] "Stochastic Optimization of Sorting Networks via Continuous Relaxations"
+           Aditya Grover, Eric Wang, Aaron Zweig & Stefano Ermon
+           ICLR (2019)
+           https://arxiv.org/abs/1903.08850
+           https://github.com/ermongroup/neuralsort (MIT license)
+    """
+    dim = x.shape[-1]
+    dims = torch.arange(dim, **utils.backend(x))
+    x = x.unsqueeze(-1)
+    A = (x - x.transpose(-1, -2)).abs_()
+    B = A.sum(-1, keepdim=True)
+    scaling = dims.add_(1).mul_(-2).add_(dim+1)
+    C = x * scaling
+
+    P_max = C.sub_(B).transpose(-1, -2).div_(tau)
+    P_hat = softmax(P_max, -1)
+
+    if hard:
+        P = torch.zeros_like(P_hat)
+        P.scatter_(-1, torch.topk(P_hat, 1, -1).values, value=1)
+        P_hat += P.sub_(P_hat).detach()
+    if descending:
+        P_hat = P_hat.flip(-2)
+    if apply:
+        return P_hat.matmul(x).squeeze(-1)
+    return P_hat
+
+
 # ======================================================================
 #
 #                           SPECIAL FUNCTIONS
 #
 # ======================================================================
+
+
 if hasattr(torch, 'digamma'):
     @torch.jit.script
     def mvdigamma(input, order: int = 1):
@@ -963,8 +1154,11 @@ if hasattr(torch, 'digamma'):
         for p in range(2, order + 1):
             dg += torch.digamma(input + (1 - p) / 2)
         return dg
+
+
 # Bessel functions were written by John Ashburner <john@fil.ion.ucl.ac.uk>
 # (Wellcome Centre for Human Neuroimaging, UCL, London, UK)
+
 
 def besseli(nu, z, mode=None):
     """Modified Bessel function of the first kind
@@ -990,9 +1184,6 @@ def besseli(nu, z, mode=None):
     is_scalar = z.dim() == 0
     if is_scalar:
         z = z[None]
-
-    nu = abs(nu)
-    z = torch.as_tensor(z).abs()
     if not isinstance(mode, int):
         code = (2 if mode == 'log' else 1 if mode == 'norm' else 0)
     else:
@@ -1006,6 +1197,9 @@ def besseli(nu, z, mode=None):
     if is_scalar:
         z = z[0]
     return z
+
+
+
 @torch.jit.script
 def besseli0(z, code: int = 0):
     """Modified Bessel function of the first kind
@@ -1022,7 +1216,6 @@ def besseli0(z, code: int = 0):
     """
     f = torch.zeros_like(z)
     msk = z < 15.0/4.0
-    tiny = 1.4014e-45
 
     # --- branch 1 ---
     if msk.any():
@@ -1030,25 +1223,29 @@ def besseli0(z, code: int = 0):
         t = (zm*(4.0/15.0))**2
         t = 1 + t*(3.5156229+t*(3.0899424+t*(1.2067492+t*(0.2659732+t*(0.0360768+t*0.0045813)))))
         if code == 2:
-            f[msk] = t.clamp_min(tiny).log()
+            f[msk] = t.log()
         else:
             if code == 1:
                 t = t / zm.exp()
             f[msk] = t
+
     # --- branch 2 ---
     msk.bitwise_not_()
     if msk.any():
         zm = z[msk]
         t = (15.0/4.0)/zm
         t = (0.39894228+t*(0.01328592+t*(0.00225319+t*(-0.00157565+t*(0.00916281+t*(-0.02057706+t*(0.02635537+t*(-0.01647633+t*0.0039237))))))))
-        t.clamp_min_(tiny)
+        t.clamp_min_(1e-32)
         if code == 2:
-            f[msk] = zm - 0.5 * zm.clamp_min(tiny).log() + t.clamp_min(tiny).log()
+            f[msk] = zm - 0.5 * zm.log() + t.log()
         elif code == 1:
             f[msk] = t / zm.sqrt()
         else:
             f[msk] = zm.exp() * t / zm.sqrt()
+
     return f
+
+
 @torch.jit.script
 def besseli1(z, code: int = 0):
     """Modified Bessel function of the first kind
@@ -1065,7 +1262,6 @@ def besseli1(z, code: int = 0):
     """
     f = torch.zeros_like(z)
     msk = z < 15.0/4.0
-    tiny = 1.4014e-45
 
     # --- branch 1 ---
     if msk.any():
@@ -1073,11 +1269,12 @@ def besseli1(z, code: int = 0):
         t = (zm*(4.0/15.0))**2
         t = 0.5+t*(0.87890594+t*(0.51498869+t*(0.15084934+t*(0.02658733+t*(0.00301532+t*0.00032411)))))
         if code == 2:
-            f[msk] = zm.clamp_min(tiny).log() + t.clamp_min(tiny).log()
+            f[msk] = zm.log() + t.log()
         elif code == 0:
             f[msk] = zm * t
         else:
             f[msk] = zm * t / zm.exp()
+
     # --- branch 2 ---
     msk.bitwise_not_()
     if msk.any():
@@ -1085,11 +1282,11 @@ def besseli1(z, code: int = 0):
         t = (15.0/4.0)/zm
         t = 0.398942281+t*(-0.03988024+t*(-0.00362018+t*(0.00163801+t*(-0.01031555+t*(0.02282967+t*(-0.02895312+t*(0.01787654-t*0.00420059)))))))
         if code == 2:
-            f[msk] = zm - 0.5 * zm.clamp_min(tiny).log() + t.clamp_min(tiny).log()
+            f[msk] = zm - 0.5 * zm.log() + t.log()
         elif code == 0:
-            f[msk] = zm.exp() * t / zm.clamp_min(tiny).sqrt()
+            f[msk] = zm.exp() * t / zm.sqrt()
         else:
-            f[msk] = t / zm.clamp_min(tiny).sqrt()
+            f[msk] = t / zm.sqrt()
     return f
 
 
@@ -1109,17 +1306,60 @@ def besseli_small(nu: float, z, M: int = 64, code: int = 0):
         besseli(nu,z)/exp(z) if code==1 ('norm')
         log(besseli(nu,z))   if code==2 ('log')
     """
-    tiny = 1.4014e-45
-    x = (0.5*z).clamp_min(tiny).log()
+    # The previous implementation of this function (`besseli_small_old`)
+    # used `z` as a stabilizing pivot in the log-sum-exp. However,
+    # this lead to underflows (`exp` returned zero). Instead, this new
+    # implementation uses the first term in the sum (m=0) as pivot.
+    # We therefore start with the second term and add 1 (= exp(0)) at the end.
+
+    # NOTE: lgamma(3) = 0.693147180559945
+    lgamma_nu_1 = pymath.lgamma(nu + 1)
+    M = max(M, 2)
+    x = torch.log(0.5*z)
+    f = torch.exp(x * 2 - (0.693147180559945 + pymath.lgamma(nu + 2) - lgamma_nu_1))
+    for m in range(2, M):
+        f = f + torch.exp(x * (2*m) - (pymath.lgamma(m + 1) + pymath.lgamma(m + 1 + nu) - lgamma_nu_1))
+    f = f + 1
+
+    if code == 2:
+        return f.log() + x * nu - lgamma_nu_1
+    elif code == 1:
+        return f * (x * nu - lgamma_nu_1 - z).exp()
+    else:
+        return f * (x * nu - lgamma_nu_1).exp()
+
+
+# DEPRECATED
+@torch.jit.script
+def besseli_small_old(nu: float, z, M: int = 64, code: int = 0):
+    """Modified Bessel function of the first kind - series computation
+    Parameters
+    ----------
+    nu : float
+    z  : tensor
+    M  : int, series length (bigger is more accurate, but slower)
+    code : {0, 1, 2}
+    Returns
+    -------
+    b : tensor
+        besseli(nu,z)        if code==0
+        besseli(nu,z)/exp(z) if code==1 ('norm')
+        log(besseli(nu,z))   if code==2 ('log')
+    """
+    M = max(M, 2)
+    x = torch.log(0.5*z)
     f = torch.exp(x * nu - pymath.lgamma(nu + 1.0) - z)
     for m in range(1, M):
         f = f + torch.exp(x * (2.0*m + nu) - (pymath.lgamma(m+1.0) + pymath.lgamma(m+1.0 + nu)) - z)
+
     if code == 2:
-        return f.clamp_min(tiny).log() + z
+        return f.log() + z
     elif code == 1:
         return f
     else:
         return f * z.exp()
+
+
 @torch.jit.script
 def besseli_large(nu: float, z, code: int = 0):
     """Modified Bessel function of the first kind
@@ -1137,7 +1377,6 @@ def besseli_large(nu: float, z, code: int = 0):
         log(besseli(nu,z))   if code==2 ('log')
     """
 
-    tiny = 1.4014e-45
     f = z/nu
     f = f*f
     msk = f > 4.0
@@ -1145,15 +1384,15 @@ def besseli_large(nu: float, z, code: int = 0):
 
     # -- branch 1 ---
     if msk.any():
-        tmp = torch.sqrt(1.0+1.0/f[msk].clamp_min(tiny))
+        tmp = torch.sqrt(1.0+f[msk].reciprocal())
         t[msk] = z[msk]*tmp/nu
-        f[msk] = nu*(t[msk] + (1.0/(nu/z[msk].clamp_min(tiny)+tmp)).clamp_min(tiny).log())
+        f[msk] = nu*(t[msk] + torch.log((nu/z[msk]+tmp).reciprocal()))
     # -- branch 2 ---
     msk = msk.bitwise_not_()
     if msk.any():
-        tmp = torch.sqrt(1.0+f[~msk])
-        t[~msk] = tmp.clamp_max(1)
-        f[~msk] = nu*(t[~msk] + (z[~msk]/(nu*(1.0+tmp))).clamp_min(tiny).log())
+        tmp = torch.sqrt(1.0+f[msk])
+        t[msk] = tmp.clamp_max(1)
+        f[msk] = nu*(t[msk] + torch.log(z[msk]/(nu*(1.0+tmp))))
 
     t = t.reciprocal()
     tt = t*t
@@ -1177,13 +1416,15 @@ def besseli_large(nu: float, z, code: int = 0):
                tt*212.5701300392171))))))/den
 
     if code == 2:
-        f = f + 0.5*(t.clamp_min(tiny).log()-pymath.log(nu)) - 0.918938533204673 # 0.5*log(2*pi)
-        f = f + us.clamp_min(tiny).log()
+        f = f + 0.5*(torch.log(t)-pymath.log(nu)) - 0.918938533204673 # 0.5*log(2*pi)
+        f = f + torch.log(us)
     elif code == 0:
         f = torch.exp(f)*torch.sqrt(t)*us*(0.398942280401433/pymath.sqrt(nu))
     else:
         f = torch.exp(f-z)*torch.sqrt(t)*us*(0.398942280401433/pymath.sqrt(nu))
     return f
+
+
 @torch.jit.script
 def besseli_any(nu: float, z, code: int = 0):
     """
@@ -1200,6 +1441,7 @@ def besseli_any(nu: float, z, code: int = 0):
         besseli(nu,z)/exp(z) if code==1 ('norm')
         log(besseli(nu,z))   if code==2 ('log')
     """
+
     if nu >= 15.0:
         f = besseli_large(nu, z, code)
     else:
@@ -1212,6 +1454,8 @@ def besseli_any(nu: float, z, code: int = 0):
         if msk.any():
             f[msk] = besseli_large(nu, z[msk], code)
     return f
+
+
 @torch.jit.script
 def besseli_ratio(nu: float, X, N: int = 4, K: int = 10):
     """Approximates ratio of the modified Bessel functions of the first kind:
@@ -1233,9 +1477,11 @@ def besseli_ratio(nu: float, X, N: int = 4, K: int = 10):
     """
 
     # Begin by computing besseli(nu+1+N,x)/besseli(nu+N,x)
+
     nu1 = nu + K
     rk: List[torch.Tensor] = []
     XX = X*X
+
     # Lower bound (eq. 20a)
     # for k=0:N, rk{k+1} = x./((nu1+k+0.5)+sqrt((nu1+k+1.5).^2+x.^2)); end
     for k in range(0, N + 1):
@@ -1244,6 +1490,7 @@ def besseli_ratio(nu: float, X, N: int = 4, K: int = 10):
         tmp = tmp + (nu1 + k + 0.5)
         tmp = X / tmp
         rk.append(tmp)
+
     for m in range(N, 0, -1):
         # Recursive updates (eq. 20b)
         # rk{k} = x./(nu1+k+sqrt((nu1+k).^2+((rk{k+1})./rk{k}).
@@ -1257,6 +1504,7 @@ def besseli_ratio(nu: float, X, N: int = 4, K: int = 10):
             rk[k2-1] = tmp
         rk.pop(-1)
     result = rk.pop(0)
+
     # Convert the result to besseli(nu+1,x)/besseli(nu,x) with
     # backward recursion (eq. 2).
     iX = X.reciprocal()
@@ -1264,13 +1512,19 @@ def besseli_ratio(nu: float, X, N: int = 4, K: int = 10):
         # result = 1. / (2. * (nu + k3) / X + result)
         result = result.add(iX, alpha=2 * (nu + k3))
         result = result.reciprocal()
+
     return result
+
+
 # TODO:
 #   The following functions should be replaced by tensor-compatible
 #   equivalents in linalg
+
+
 from numpy import real
 from scipy.linalg import expm as expm_scipy
 from scipy.linalg import logm as logm_scipy
+
 
 def expm(M):
     """ Computes the matrix exponential of M.
@@ -1286,6 +1540,7 @@ def expm(M):
     M = torch.from_numpy(M).type(dtype).to(device)
     return M
 
+
 def logm(M):
     """ Computes the real matrix logarithm of M.
     Args:
@@ -1300,7 +1555,8 @@ def logm(M):
     M = real(M)
     M = torch.from_numpy(M).type(dtype).to(device)
     return M
-    
+
+
 def besseli_old(X, order=0, Nk=64):
     """ Approximates the modified Bessel function of the first kind,
         of either order zero or one.
