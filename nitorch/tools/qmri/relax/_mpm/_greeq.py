@@ -97,7 +97,6 @@ def greeq(data, transmit=None, receive=None, opt=None, **kwopt):
     opt = GREEQOptions().update(opt, **kwopt)
     dtype = opt.backend.dtype
     device = opt.backend.device
-    chi = opt.likelihood[0].lower() == 'c'
     backend = dict(dtype=dtype, device=device)
 
     # --- estimate noise / register / initialize maps ---
@@ -281,8 +280,13 @@ def greeq(data, transmit=None, receive=None, opt=None, **kwopt):
         if hasattr(maps, 'mt'):
             maps.mt.uncertainty = uncertainty[3]
     
+    std2l = []
+    dofl = []
+    for contrast in data:
+        std2l.append(contrast.noise)
+        dofl.append(contrast.dof)
     # --- Prepare output ---
-    return postproc(maps)
+    return postproc(maps, noise = std2l, dof = dofl)
 
 
 def _nonlin_uncertainty(hess, rls, lam, vx, opt):
@@ -824,3 +828,83 @@ def _nonlin_rls(maps, lam=1., norm='jtv'):
         rls = rls.sqrt_()
 
     return rls
+
+# def nll_chi(dat, fit, msk, lam, df, return_residuals=True):
+#     """Negative log-likelihood of the noncentral Chi distribution
+
+#     Parameters
+#     ----------
+#     dat : tensor
+#         Observed data (should be zero where not observed)
+#     fit : tensor
+#         Signal fit (should be zero where not observed)
+#     msk : tensor
+#         Mask of observed values
+#     lam : float
+#         Noise precision
+#     df : float
+#         Degrees of freedom
+#     return_residuals : bool
+#         Return residuals (gradient) on top of nll
+
+#     Returns
+#     -------
+#     nll : () tensor
+#         Negative log-likelihood
+#     res : tensor, if `return_residuals`
+#         Residuals
+
+#     """
+#     z = (dat * fit * lam).clamp_min_(1e-32)
+#     xi = besseli_ratio(df / 2 - 1, z)
+#     logbes = besseli(df / 2 - 1, z, 'log')
+#     logbes = logbes[msk].sum(dtype=torch.double)
+
+#     # chi log-likelihood
+#     fitm = fit[msk]
+#     sumlogfit = fitm.clamp_min(1e-32).log_().sum(dtype=torch.double)
+#     sumfit2 = fitm.flatten().dot(fitm.flatten())
+#     del fitm
+#     datm = dat[msk]
+#     sumlogdat = datm.clamp_min(1e-32).log_().sum(dtype=torch.double)
+#     sumdat2 = datm.flatten().dot(datm.flatten())
+#     del datm
+
+#     crit = (df / 2 - 1) * sumlogfit - (df / 2) * sumlogdat - logbes
+#     crit += 0.5 * lam * (sumfit2 + sumdat2)
+#     if not return_residuals:
+#         return crit
+#     res = dat.mul_(xi).neg_().add_(fit)
+#     return crit, res
+
+
+# def nll_gauss(dat, fit, msk, lam, return_residuals=True):
+#     """Negative log-likelihood of the noncentral Chi distribution
+
+#     Parameters
+#     ----------
+#     dat : tensor
+#         Observed data (should be zero where not observed)
+#     fit : tensor
+#         Signal fit (should be zero where not observed)
+#     msk : tensor
+#         Mask of observed values
+#     lam : float
+#         Noise precision
+#     nu : float
+#         Degrees of freedom
+#     return_residuals : bool
+#         Return residuals (gradient) on top of nll
+
+#     Returns
+#     -------
+#     nll : () tensor
+#         Negative log-likelihood
+#     res : tensor, if `return_residuals`
+#         Residuals
+
+#     """
+#     res = dat.neg_().add_(fit)
+#     crit = 0.5 * lam * ssq(res[msk])
+#     return (crit, res) if return_residuals else crit
+
