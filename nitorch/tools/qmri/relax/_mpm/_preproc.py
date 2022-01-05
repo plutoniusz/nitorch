@@ -88,6 +88,8 @@ def preproc(data, transmit=None, receive=None, opt=None):
     device = opt.backend.device
 
     backend = dict(dtype=dtype, device=device)
+    if opt.noisemodel == 'same':
+        opt.noisemodel = opt.likelihood
     noisemodel = opt.noisemodel[0].lower() == 'c'
     # --- estimate hyper parameters ---
     logmeans = []
