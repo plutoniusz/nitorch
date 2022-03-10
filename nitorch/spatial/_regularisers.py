@@ -41,6 +41,24 @@ from nitorch.core.py import ensure_list
 from ._finite_differences import diff, div, diff1d, div1d
 from ._spconv import spconv
 import itertools
+from nitorch.core.optionals import try_import_as
+c_solvers = try_import_as('nitorch._C.solve')
+
+
+def _mul_(x, y):
+    """Smart in-place multiplication"""
+    if torch.is_tensor(y) and y.requires_grad:
+        return x * y
+    else:
+        return x.mul_(y)
+
+
+def _div_(x, y):
+    """Smart in-place division"""
+    if torch.is_tensor(y) and y.requires_grad:
+        return x / y
+    else:
+        return x.div_(y)
 
 
 def absolute(field, weights=None):
@@ -85,7 +103,10 @@ def absolute_grid(grid, voxel_size=1, weights=None):
     if weights is not None:
         backend = dict(dtype=grid.dtype, device=grid.device)
         weights = torch.as_tensor(weights, **backend)
-        grid = grid * weights[..., None]
+        if weights.requires_grad:
+            grid = grid * weights[..., None]
+        else:
+            grid *= weights[..., None]
     return grid
 
 
@@ -112,32 +133,47 @@ def membrane(field, voxel_size=1, bound='dct2', dim=None, weights=None):
     if weights is None:
         return _membrane_l2(field, voxel_size, bound, dim)
 
-    def mul_(x, y):
-        """Smart in-place multiplication"""
-        if ((torch.is_tensor(x) and x.requires_grad) or
-                (torch.is_tensor(y) and y.requires_grad)):
-            return x * y
-        else:
-            return x.mul_(y)
-
     backend = dict(dtype=field.dtype, device=field.device)
     dim = dim or field.dim()
     if torch.is_tensor(voxel_size):
         voxel_size = make_vector(voxel_size, dim, **backend)
+    else:
+        voxel_size = core.py.ensure_list(voxel_size, dim)
+    bound = ensure_list(bound, dim)
     dims = list(range(field.dim()-dim, field.dim()))
-    fieldf = diff(field, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
     weights = torch.as_tensor(weights, **backend)
-    fieldf = mul_(fieldf, weights[..., None])
-    fieldb = diff(field, dim=dims, voxel_size=voxel_size, side='b', bound=bound)
-    fieldb = mul_(fieldb, weights[..., None])
-    dims = list(range(fieldb.dim() - 1 - dim, fieldb.dim() - 1))
-    fieldb = div(fieldb, dim=dims, voxel_size=voxel_size, side='b', bound=bound)
-    dims = list(range(fieldf.dim()-1-dim, fieldf.dim()-1))
-    field = div(fieldf, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
-    del fieldf
-    field += fieldb
-    field *= 0.5
-    return field
+
+    # dims = list(range(field.dim()-dim, field.dim()))
+    # fieldb = diff(field, dim=dims, voxel_size=voxel_size, side='b', bound=bound)
+    # fieldb = mul_(fieldb, weights[..., None])
+    # dims = list(range(fieldb.dim() - 1 - dim, fieldb.dim() - 1))
+    # fieldb = div(fieldb, dim=dims, voxel_size=voxel_size, side='b', bound=bound)
+    #
+    # dims = list(range(field.dim()-dim, field.dim()))
+    # field = diff(field, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
+    # field = mul_(field, weights[..., None])
+    # dims = list(range(field.dim()-1-dim, field.dim()-1))
+    # field = div(field, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
+    # field += fieldb
+    # field *= 0.5
+
+    if not field.requires_grad:
+        buf1 = torch.empty_like(field)
+        buf2 = torch.empty_like(field)
+    else:
+        buf1 = buf2 = None
+
+    mom = 0
+    for i in range(dim):
+        for side in ('f', 'b'):
+            g = diff1d(field, dim=dims[i], bound=bound[i],
+                       voxel_size=voxel_size[i], side=side, out=buf1)
+            g = _mul_(g, weights)
+            mom += div1d(g, dim=dims[i], bound=bound[i],
+                         voxel_size=voxel_size[i], side=side, out=buf2)
+
+    mom *= 0.5
+    return mom
 
 
 def _membrane_l2(field, voxel_size=1, bound='dct2', dim=None):
@@ -150,6 +186,7 @@ def _membrane_l2(field, voxel_size=1, bound='dct2', dim=None):
     fieldf = diff(field, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
     dims = list(range(fieldf.dim()-1-dim, fieldf.dim()-1))
     field = div(fieldf, dim=dims, voxel_size=voxel_size, side='f', bound=bound)
+
     return field
 
 
@@ -211,24 +248,29 @@ def bending(field, voxel_size=1, bound='dct2', dim=None, weights=None):
         voxel_size = core.py.ensure_list(voxel_size, dim)
     bound = ensure_list(bound, dim)
     dims = list(range(field.dim()-dim, field.dim()))
-    if weights is not None:
-        backend = dict(dtype=field.dtype, device=field.device)
-        weights = torch.as_tensor(weights, **backend)
+    weights = torch.as_tensor(weights, **backend)
+
+    if not field.requires_grad:
+        bufi = torch.empty_like(field)
+        bufij = torch.empty_like(field)
+        bufjj = torch.empty_like(field)
+    else:
+        bufi = bufij = bufjj = None
 
     mom = 0
     for i in range(dim):
         for side_i in ('f', 'b'):
             opti = dict(dim=dims[i], bound=bound[i], side=side_i,
                         voxel_size=voxel_size[i])
-            di = diff1d(field, **opti)
+            di = diff1d(field, **opti, out=bufi)
             for j in range(i, dim):
                 for side_j in ('f', 'b'):
                     optj = dict(dim=dims[j], bound=bound[j], side=side_j,
                                 voxel_size=voxel_size[j])
-                    dj = diff1d(di, **optj)
-                    dj = dj * weights
-                    dj = div1d(dj, **optj)
-                    dj = div1d(dj, **opti)
+                    dj = diff1d(di, **optj, out=bufij)
+                    dj = _mul_(dj, weights)
+                    dj = div1d(dj, **optj, out=bufjj)
+                    dj = div1d(dj, **opti, out=bufij)
                     if i != j:
                         # off diagonal -> x2  (upper + lower element)
                         dj.mul_(2)
@@ -270,9 +312,9 @@ def _bending_l2(field, voxel_size=1, bound='dct2', dim=None):
                     dj = div1d(dj, **opti, out=bufij)
                     if i != j:
                         # off diagonal -> x2  (upper + lower element)
-                        dj.mul_(2)
+                        dj = dj.mul_(2)
                     mom += dj
-    mom.div_(4.)
+    mom = mom.div_(4.)
     return mom
 
 
@@ -1008,7 +1050,13 @@ def regulariser_grid(v, absolute=0, membrane=0, bending=0, lame=0,
 
     if not (absolute or membrane or bending or any(ensure_list(lame))):
         return torch.zeros_like(v)
-    
+
+    if c_solvers and not v.requires_grad:
+        return c_solvers.c_regulariser_grid(
+            v, weights, None,
+            absolute, membrane, bending, lame, factor,
+            voxel_size=voxel_size, bound=bound)
+
     if torch.is_tensor(kernel) or kernel:
         if not torch.is_tensor(kernel):
             kernel = regulariser_grid_kernel(dim, absolute, membrane, bending,
@@ -1112,6 +1160,13 @@ def regulariser(x, absolute=0, membrane=0, bending=0, factor=1,
     """
     if not (absolute or membrane or bending):
         return torch.zeros_like(x)
+
+    dim = dim or (x.dim() - 1)
+    if c_solvers and not x.requires_grad:
+        return c_solvers.c_regulariser(
+            x, weights, None, dim,
+            absolute, membrane, bending, factor,
+            voxel_size=voxel_size, bound=bound)
 
     backend = dict(dtype=x.dtype, device=x.device)
     dim = dim or x.dim() - 1

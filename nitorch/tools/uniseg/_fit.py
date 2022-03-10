@@ -6,12 +6,15 @@ import torch
 from ._mrf import mrf, mrf_suffstat, mrf_covariance
 from ._plot import plot_lb, plot_images_and_lb
 
-
 default_warp_reg = {'absolute': 0,
                     'membrane': 0.001,
                     'bending': 0.5,
-                    'lame': (0.05, 0.2), }
+                    'lame': (0.05, 0.2),
+                    }
 
+# default_warp_reg = {'absolute': 0,
+#                     'membrane': 0.5,
+#                     'lame': (0.05, 0.2), }
 
 def _softmax_lse(x, dim=-1, W=None):
     """Implicit softmax that also returns the LSE"""
@@ -27,8 +30,8 @@ def _softmax_lse(x, dim=-1, W=None):
     sumval = sumval.log_()
     lse += sumval
     if W is not None:
-        if not lse.dim():
-            lse = lse * W.sum()
+        if lse.numel() == 1:
+            lse = lse.sum() * W.sum()
             return x, lse
         lse *= W
     lse = lse.sum(dtype=torch.float64)
@@ -43,11 +46,11 @@ class SpatialMixture:
 
     def __init__(self, nb_classes=6, prior=None, affine_prior=None,
                  do_bias=True, do_warp=True, do_mixing=True, do_mrf=True,
-                 lam_bias=0.1, lam_warp=0.1, lam_mixing=100, lam_mrf=100,
+                 lam_bias=0.1, lam_warp=0.1, lam_mixing=100, lam_mrf=10,
                  bias_acceleration=0, warp_acceleration=0.9, spacing=3,
-                 max_iter=30, tol=1e-3, max_iter_intensity=8,
+                 max_iter=30, tol=1e-3, max_iter_intensity=8, max_iter_mrf=50,
                  max_iter_cluster=20, max_iter_bias=1, max_iter_warp=3,
-                 verbose=1, plot=0):
+                 max_iter_mixing=10, verbose=1, plot=0):
         """
         Parameters
         ----------
@@ -84,7 +87,7 @@ class SpatialMixture:
             {'membrane': 1e-3, 'bending': 0.5, 'lame': (0.05, 0.2)}
         lam_mixing : float, default=100
             Dirichlet regularization of the mixing proportions
-        lam_mrf : float, default=100
+        lam_mrf : float, default=10
             Dirichlet regularization of the MRF prior.
 
         Performance
@@ -96,7 +99,11 @@ class SpatialMixture:
         max_iter_intensity : int, default=8
             Maximum number of GMM+Bias (EM) iterations
         max_iter_cluster : int, default=20
-            Maximum number of GMM iterations
+            Maximum number of GMM (EM) iterations
+        max_iter_mrf : int, default=50
+            Maximum number of MRF (EM) iterations
+        max_iter_mixing : int, default=10
+            Maximum number of Mixing (EM) iterations
         max_iter_bias : int, default=1
             Maximum number of Bias (Gauss-Newton) iterations
         max_iter_warp : int, default=3
@@ -156,6 +163,8 @@ class SpatialMixture:
         self.do_warp = do_warp
         self.do_mixing = do_mixing
         self.do_mrf = do_mrf
+        if self.do_mrf is True:
+            self.do_mrf = 'learn'
 
         if prior is None:
             self.do_warp = False
@@ -167,13 +176,19 @@ class SpatialMixture:
         self.max_iter_cluster = max_iter_cluster
         self.max_iter_bias = max_iter_bias
         self.max_iter_warp = max_iter_warp
-        self.max_ls_warp = 0  # 12
+        self.max_iter_mrf = max_iter_mrf
+        self.max_iter_mixing = max_iter_mixing
+        self.max_ls_warp = 0 #12
         self.tol = tol
 
         if not self.do_bias:
             self.max_iter_bias = 0
         if not self.do_warp:
             self.max_iter_warp = 0
+        if not self.do_mixing:
+            self.max_iter_mixing = 0
+        if self.do_mrf != 'learn':
+            self.max_iter_mrf = 0
 
         # Verbosity
         self.verbose = verbose
@@ -261,7 +276,8 @@ class SpatialMixture:
             Final lower bound
 
         """
-        with torch.random.fork_rng():
+        with torch.random.fork_rng([] if X.device.type == 'cpu' else
+                                   [X.device]):
             torch.random.manual_seed(1)
             return self._fit(X, W, aff, **kwargs)
 
@@ -325,7 +341,9 @@ class SpatialMixture:
             X = X[(Ellipsis, *slicer)]
             W = W[tuple(slicer)].to(X.dtype)
 
-        # Initialise model parameters
+        # Initialise model parameters (one gaussian per class)
+        self._lkp = self.lkp
+        self.lkp = list(range(self.nb_classes))
         self._init_parameters(X, W, aff, **kwargs)
 
         # EM loop
@@ -348,7 +366,7 @@ class SpatialMixture:
             print(v)
 
         if self.plot > 0:
-            M = self.warp_tpm(aff=aff0, mode='logit')
+            M = self.warp_tpm(aff=aff0, mode='logit', shape=X0.shape[1:])
             self._plot_lb(all_lb, X0, Z, M, mode='final')
 
         return Z, all_lb[-1]
@@ -379,7 +397,7 @@ class SpatialMixture:
             XB = self.beta.exp().mul_(XB)
         M = None
         if self.log_prior is not None:
-            M = self.warp_tpm(aff=aff, mode='logit')
+            M = self.warp_tpm(aff=aff, mode='logit', shape=X.shape[1:])
         vx = spatial.voxel_size(aff)
         Z, _, _ = self.e_step(XB, W, M, vx=vx, combine=True)
         return Z
@@ -425,19 +443,19 @@ class SpatialMixture:
                 L[k] += M[k0-1]
         if self.do_mrf:
             if self.nb_clusters != self.nb_classes:
-                Z = math.softmax(L + self._tinyish, dim=0)
+                Z = math.softmax(L, dim=0)
                 Z = self._z_combine(Z)
                 Lcomb = Z.log()
             else:
                 Lcomb = L
-                Z = math.softmax(Lcomb + self._tinyish, dim=0)
+                Z = math.softmax(Lcomb, dim=0)
             Z, LMRF = mrf(Z, self.psi, Lcomb, W, vx=vx, inplace=True)
             # Z0 now contains \sum_j log(pi)[j] @ Z[j]
             for k, k0 in enumerate(self.lkp):
                 L[k] += LMRF[k0]
         # --- softmax ---
-        Z, lb = math.softmax_lse(L + self._tinyish, lse=True, weights=W, dim=0)
-        return Z, LMRF, lb
+        Z, lb = math.softmax_lse(L, lse=True, weights=W, dim=0)
+        return Z, LMRF, lb.cpu()
 
     def _z_combine(self, Z0):
         # Dumb way to compute the "classes" responsibilities.
@@ -471,15 +489,16 @@ class SpatialMixture:
 
         """
         vx = spatial.voxel_size(aff) if aff is not None else None
-        nW = W.sum() if W is not None else X[1:].numel()
+        nW = W.sum().cpu() if W is not None else X[1:].numel()
 
         # --- prepare warped template and its gradients ----------------
         M = G = None
         if self.log_prior is not None:
             if self.do_warp:
-                M, G = self.warp_tpm(aff=aff, grad=True, mode='logit')
+                M, G = self.warp_tpm(aff=aff, mode='logit', shape=X.shape[1:],
+                                     grad=True)
             else:
-                M = self.warp_tpm(aff=aff, mode='logit')
+                M = self.warp_tpm(aff=aff, mode='logit', shape=X.shape[1:])
 
         # --- bias corrected volume ------------------------------------
         XB = X
@@ -496,11 +515,19 @@ class SpatialMixture:
         all_all_lb = []
         lb = -float('inf')
         plot_mode = None
+        do_split = self.lkp != self._lkp
         for n_iter in range(self.max_iter):  # EM loop
             olb_em = lb
 
             for n_iter_intensity in range(self.max_iter_intensity):
                 olb_intensity = lb
+
+                if n_iter_intensity == 1 and do_split:
+                    do_split = False
+                    self.lkp = self._lkp
+                    self._split_clusters()
+                    all_lb = []
+                    all_all_lb = []
 
                 for n_iter_cluster in range(self.max_iter_cluster):
                     # ======
@@ -511,10 +538,11 @@ class SpatialMixture:
                     S, lse = self._make_prior(M, L, W)
                     lb -= lse
                     lb += self._lb_parameters()
-                    all_all_lb.append(lb)
+                    all_all_lb.append(lb/nW)
                     if self.verbose >= 3:
+                        gain = (lb - olb) / (self.tol * nW)
                         print(f'{n_iter:02d} | {n_iter_intensity:02d} | {n_iter_cluster:02d} | '
-                              f'pre gmm: {lb.item()/nW:12.6g}')
+                              f'pre gmm:  {lb.item()/nW:12.6g} ({gain:.6g})')
 
                     # ==================
                     # M-step - Intensity
@@ -522,20 +550,35 @@ class SpatialMixture:
                     ss0, ss1, ss2 = self._suffstats(XB, Z, W)
                     self._update_intensity(ss0, ss1, ss2)
 
-                    Z = self._z_combine(Z)
-
                     if self.plot >= 4:
                         # plot after responsibilities have been combined
+                        Z = self._z_combine(Z)
                         self._plot_lb(all_all_lb, X, Z, M, mode=plot_mode)
+                    plot_mode = 'gmm' if plot_mode != 'bias' else 'bias'
 
                     # ===========================
                     # M-step - Mixing proportions
                     # ===========================
-                    if self.do_mixing:
-                        self._update_mixing(ss0, W, S)
-                        S, lse = self._make_prior(M, L, W)
+                    if n_iter_intensity > 0:
+                        for n_iter_mrf in range(self.max_iter_mixing):
+                            if n_iter_mrf > 0:
+                                olb = lb
+                                Z, L, lb = self.e_step(XB, W, M, vx=vx, combine=True)
+                                S, lse = self._make_prior(M, L, W)
+                                lb -= lse
+                                lb += self._lb_parameters()
+                                all_all_lb.append(lb/nW)
+                                if self.verbose >= 3:
+                                    gain = (lb - olb) / (self.tol * nW)
+                                    print(f'{n_iter:02d} | {n_iter_intensity:02d} | {n_iter_mrf:02d} | '
+                                          f'pre mix:  {lb.item()/nW:12.6g} ({gain:.6g})')
+                                if self.plot >= 4:
+                                    self._plot_lb(all_all_lb, X, Z, M, mode=plot_mode)
 
-                    plot_mode = 'gmm'
+                            self._update_mixing(ss0, W, S)
+
+                            if n_iter_mrf > 1 and lb-olb < 0.5 * self.tol * nW:
+                                break
 
                     if n_iter_cluster > 1 and lb-olb < self.tol * nW:
                         break
@@ -543,8 +586,26 @@ class SpatialMixture:
                 # ============================
                 # M-step - Markov Random Field
                 # ============================
-                if self.do_mrf == 'learn' and n_iter_intensity >= 2:
-                    self._update_mrf(Z, W, S, vx)
+                if n_iter_intensity > 1:
+                    for n_iter_mrf in range(self.max_iter_mrf):
+                        if n_iter_mrf > 0:
+                            olb = lb
+                            Z, L, lb = self.e_step(XB, W, M, vx=vx, combine=True)
+                            S, lse = self._make_prior(M, L, W)
+                            lb -= lse
+                            lb += self._lb_parameters()
+                            all_all_lb.append(lb/nW)
+                            if self.verbose >= 3:
+                                gain = (lb - olb) / (self.tol * nW)
+                                print(f'{n_iter:02d} | {n_iter_intensity:02d} | {n_iter_mrf:02d} | '
+                                      f'pre mrf:  {lb.item()/nW:12.6g} ({gain:.6g})')
+                            if self.plot >= 4:
+                                self._plot_lb(all_all_lb, X, Z, M, mode=plot_mode)
+
+                        self._update_mrf(Z, W, S, vx)
+
+                        if n_iter_mrf > 1 and lb-olb < 0.5 * self.tol * nW:
+                            break
 
                 for n_iter_bias in range(self.max_iter_bias):
                     # ======
@@ -555,10 +616,11 @@ class SpatialMixture:
                     S, lse = self._make_prior(M, L, W)
                     lb -= lse
                     lb += self._lb_parameters()
-                    all_all_lb.append(lb)
+                    all_all_lb.append(lb/nW)
                     if self.verbose >= 2:
+                        gain = (lb - olb) / (self.tol * nW)
                         print(f'{n_iter:02d} | {n_iter_intensity:02d} | {n_iter_bias:02d} | '
-                              f'pre bias: {lb.item()/nW:12.6g}')
+                              f'pre bias: {lb.item()/nW:12.6g} ({gain:.6g})')
                     self._plot_lb(all_all_lb, X, self._z_combine(Z), M, mode=plot_mode)
 
                     # =============
@@ -583,17 +645,19 @@ class SpatialMixture:
                 S, lse = self._make_prior(M, L, W)
                 lb -= lse
                 lb += self._lb_parameters()
-                all_all_lb.append(lb)
+                all_all_lb.append(lb/nW)
                 if self.verbose >= 2:
+                    gain = (lb - olb) / (self.tol * nW)
                     print(f'{n_iter:02d} | {n_iter_warp:02d} | {"":2s} | '
-                          f'pre warp: {lb.item()/nW:12.6g}')
+                          f'pre warp: {lb.item()/nW:12.6g} ({gain:.6g})')
                 self._plot_lb(all_all_lb, X, Z, M, mode=plot_mode)
 
                 # =============
                 # M-step - Warp
                 # =============
                 self._update_warp(Z, S, G, L, W, aff=aff)
-                M, G = self.warp_tpm(aff=aff, grad=True, mode='logit')
+                M, G = self.warp_tpm(aff=aff, mode='logit', shape=X.shape[1:],
+                                     grad=True)
                 plot_mode = 'warp'
 
                 if n_iter_warp > 1 and lb - olb < self.tol * nW:
@@ -602,7 +666,7 @@ class SpatialMixture:
             # ==================
             # Log-likelihood
             # ==================
-            all_lb.append(lb)
+            all_lb.append(lb/nW)
             if n_iter > 1 and lb - olb_em < 2 * self.tol * nW:
                 if self.verbose > 0:
                     print('converged')
@@ -629,7 +693,7 @@ class SpatialMixture:
         else:
             L = self.gamma.clone()
         L, lse = _softmax_lse(L, 0, W)
-        return L, lse
+        return L, lse.cpu()
 
     def _suffstats(self, X, Z, W=None):
         """ Compute sufficient statistics.
@@ -644,7 +708,7 @@ class SpatialMixture:
         Returns
         -------
         ss0 : (K,) tensor
-            0th moment (B, K).
+            0th moment
         ss1 : (K, C) tensor
             1st moment
         ss2 : (K, C, C) tensor
@@ -666,19 +730,14 @@ class SpatialMixture:
         C = X.shape[0]
         K = Z.shape[0]
 
-        ss1 = X.new_zeros((K, C), dtype=torch.double)
-        ss2 = X.new_zeros((K, C, C), dtype=torch.double)
-
-        # Compute 0th moment
-        if W is not None:
-            ss0 = torch.sum(Z.reshape(K, -1) * W.flatten(), dim=-1,
-                            dtype=torch.double)
-        else:
-            ss0 = torch.sum(Z.reshape(K, -1), dim=-1, dtype=torch.double)
+        ss0 = X.new_empty((K,), dtype=torch.double)
+        ss1 = X.new_empty((K, C), dtype=torch.double)
+        ss2 = X.new_empty((K, C, C), dtype=torch.double)
 
         # Compute 1st and 2nd moments
         buffer = torch.empty_like(X[0])
         for k in range(K):
+            ss0[k] = reduce(Z[k], W, buffer=buffer)
             for c in range(C):
                 ss1[k, c] = reduce(X[c], Z[k], W, buffer=buffer)
                 ss2[k, c, c] = reduce(X[c], X[c], Z[k], W, buffer=buffer)
@@ -716,6 +775,10 @@ class SpatialMixture:
         raise NotImplementedError('The observation log-likelihood must '
                                   'be implemented in concrete child classes')
 
+    def _split_cluters(self):
+        raise NotImplementedError('The method to split clusters must '
+                                  'be implemented in concrete child classes')
+
     def _init_parameters(self, X, W=None, aff=None, **kwargs):
         C = X.shape[0]
         N = X.shape[1:]
@@ -750,9 +813,11 @@ class SpatialMixture:
             psi_shape = [self.nb_classes] * 2
             self.psi = torch.as_tensor(mrf, **backend).expand(psi_shape)
             self.psi = math.logit(self.psi, 0, implicit=(False, True))
+        # elif self.do_mrf == 'learn':
+        #     psi_shape = [self.nb_classes - 1, self.nb_classes]
+        #     self.psi = torch.zeros(psi_shape, **backend)
         elif self.do_mrf:
             self.psi = torch.eye(self.nb_classes, **backend)
-            # self.psi -= self.psi[:1]
             self.psi = self.psi[1:] - self.psi[:1]
         else:
             self.psi = None
@@ -851,7 +916,10 @@ class SpatialMixture:
         if M.dim() == 1:
             M = N*M
         elif W is not None:
-            M = M.reshape([K-1, -1]).matmul(W.reshape([-1, 1]))[:, 0]
+            if W.dtype is torch.bool:
+                M = M[:, W].sum(-1)
+            else:
+                M = M.reshape([K-1, -1]).matmul(W.reshape([-1, 1]))[:, 0]
         else:
             M = M.reshape([K-1, -1]).sum(-1)
 
@@ -865,7 +933,7 @@ class SpatialMixture:
         self.gamma -= delta_gamma
 
         if self.lam_mixing:
-            self._lb_mixing = -0.5 * self.lam_mixing * self.gamma.square().sum()
+            self._lb_mixing = -0.5 * self.lam_mixing * self.gamma.square().sum().cpu()
 
     def _update_mrf(self, Z, W=None, M=None, vx=1):
         """
@@ -911,7 +979,7 @@ class SpatialMixture:
         self.psi -= delta_psi
 
         if self.lam_mrf:
-            self._lb_mrf = -0.5 * self.lam_mrf * self.psi.square().sum()
+            self._lb_mrf = -0.5 * self.lam_mrf * self.psi.square().sum().cpu()
 
     # TODO: it seems that I could get rid of the line search
     def _update_warp(self, Z, M, G, L, W=None, aff=None):
@@ -1013,10 +1081,10 @@ class SpatialMixture:
 
         lam = {'factor': vx.prod(), 'voxel_size': vx, **self.lam_warp}
         La = spatial.regulariser_grid(self.alpha, **lam)
-        aLa = self.alpha.flatten().dot(La.flatten())
+        aLa = self.alpha.flatten().dot(La.flatten()).cpu()
         g += La
 
-        delta = spatial.solve_grid_fmg(H, g, **lam)
+        delta = spatial.solve_grid_fmg(H, g, **lam, nb_iter=4)
         if not self.max_ls_warp:
             self.alpha -= delta
             self._lb_warp = -0.5 * aLa
@@ -1024,9 +1092,10 @@ class SpatialMixture:
 
         # line search
         dLd = spatial.regulariser_grid(delta, **lam)
-        dLd = delta.flatten().dot(dLd.flatten())
-        dLa = delta.flatten().dot(La.flatten())
+        dLd = delta.flatten().dot(dLd.flatten()).cpu()
+        dLa = delta.flatten().dot(La.flatten()).cpu()
         armijo, prev_armijo = 1, 0
+        ll0 = ll0.cpu()
         success = False
         for n_ls in range(self.max_ls_warp):
             self.alpha.sub_(delta, alpha=armijo - prev_armijo)
@@ -1038,6 +1107,8 @@ class SpatialMixture:
                 ll = (W * logM0).sum() + logM.mul_(Z).mul_(W).sum()
             else:
                 ll = logM0.sum() + logM.mul_(Z).sum()
+            ll = ll.cpu()
+
             if ll + armijo * (dLa - 0.5 * armijo * dLd) > ll0:
                 success = True
                 print('success', n_ls)
@@ -1056,7 +1127,7 @@ class SpatialMixture:
     def _update_bias(self, *a, **k):
         pass
 
-    def warp_tpm(self, aff=None, grad=False, mode='softmax'):
+    def warp_tpm(self, aff=None, grad=False, mode='softmax', shape=None):
         """
 
         Parameters
@@ -1076,11 +1147,14 @@ class SpatialMixture:
 
         if self.log_prior is None:
             return None
-        dim = self.alpha.shape[-1]
-        grid = spatial.add_identity_grid(self.alpha)
+        dim = self.log_prior.dim() - 1
+        if self.alpha is not None:
+            grid = spatial.add_identity_grid(self.alpha)
+        else:
+            grid = spatial.identity_grid(shape, **utils.backend(self.log_prior))
         if aff is not None:
-            aff = torch.matmul(self.affine_prior.inverse(), aff)
-            grid = spatial.affine_matvec(aff, grid)
+            aff = torch.matmul(self.affine_prior.inverse().to(aff), aff)
+            grid = spatial.affine_matvec(aff.to(grid), grid)
         mask = self.log_prior.new_ones(self.log_prior.shape[1:])
         if mode == 'mask8':
             # remove bottom 5 mm
@@ -1114,13 +1188,14 @@ class UniSeg(SpatialMixture):
     Unified Segmentation model, based on multivariate Gaussian Mixture Model (GMM).
     """
 
-    def __init__(self, *args, wishart=True, **kwargs):
+    def __init__(self, *args, wishart=True, lam_wishart=1, **kwargs):
         # wishart : bool or 'preproc8', default=True
         #   If True, use a Wishart prior derived from global suffstats.
         #   If 'preproc8', the bottom of the template FOV is discarded
         #   when estimating these suffstats.
         super().__init__(*args, **kwargs)
         self.wishart = wishart
+        self.lam_wishart = lam_wishart
 
     @property
     def mean(self):
@@ -1161,7 +1236,7 @@ class UniSeg(SpatialMixture):
         mu = mu.to(**backend)
 
         log_pdf = (X.reshape(C, -1).T - mu)
-        log_pdf = linalg.matvec(chol, log_pdf).square_()
+        log_pdf = linalg.matvec(chol, log_pdf).square_().sum(-1)
         log_pdf += log_det
         log_pdf *= -0.5
         log_pdf += self.kappa[cluster].log().to(**backend)
@@ -1186,7 +1261,7 @@ class UniSeg(SpatialMixture):
         # - Otherwise, we just use the weight map
         mode = 'mask8' if self.wishart == 'preproc8' else 'mask'
         if self.log_prior is not None:
-            M = self.warp_tpm(mode=mode, aff=aff)
+            M = self.warp_tpm(mode=mode, aff=aff, shape=X.shape[1:])
             if W is not None:
                 M *= W
         elif W is not None:
@@ -1199,14 +1274,14 @@ class UniSeg(SpatialMixture):
         # 2) Estimate the (diagonal) variance of the data, assuming
         #    a single Gaussian.
         ss0, ss1, ss2 = self._suffstats(X, W[None])
-        ss0 = ss0[0]
-        ss1 = ss1[0]
-        ss2 = ss2[0].diag()
+        ss0 = ss0[0].cpu()
+        ss1 = ss1[0].cpu()
+        ss2 = ss2[0].cpu().diag()
         scale = ss2 / ss0 - (ss1/ss0).square()
 
         # 3) Fiddle with degrees of freedom
-        scale /= max(self.nb_clusters_per_class) ** 2
-        df = len(X)
+        scale /= sum(self.nb_clusters_per_class) ** 2
+        df = len(X) * self.lam_wishart
         self.wishart = (scale.diag(), df)
 
     def _init_parameters(self, X, W=None, aff=None, **kwargs):
@@ -1221,9 +1296,10 @@ class UniSeg(SpatialMixture):
 
         if self.log_prior is not None:
             # init from suffstats
+            self.df = torch.empty((K,), **backend)
             self.mu = torch.empty((K, C), **backend)
             self.sigma = torch.empty((K, C, C), **backend)
-            M = self.warp_tpm(aff=aff)
+            M = self.warp_tpm(aff=aff, shape=X.shape[1:])
             if W is not None:
                 M *= W
             ss0, ss1, ss2 = self._suffstats(X, M)
@@ -1258,6 +1334,62 @@ class UniSeg(SpatialMixture):
                 for c in range(C):
                     self.sigma[:, c, c] = (mx[c] - mn[c]) / K**2
 
+            self.df = torch.zeros(K, **backend)
+
+    def _split_clusters(self):
+        # Heuristic to split a single Gaussians into multiple Gaussians.
+
+        if len(self.mu) == self.nb_clusters:
+            return
+
+        mu0 = self.mu.cpu()
+        sigma0 = self.sigma.cpu()
+        df0 = self.df.cpu()
+        kappa0 = self.kappa.cpu()
+        K = self.nb_clusters
+
+        mu = mu0.new_empty([K, *mu0.shape[1:]])
+        sigma = sigma0.new_empty([K, *sigma0.shape[1:]])
+        df = df0.new_empty([K, *df0.shape[1:]])
+        kappa = kappa0.new_ones([K, *kappa0.shape[1:]])
+        for k in range(self.nb_classes):
+            mask = [k1 == k for k1 in self.lkp]
+            K1 = sum(mask)
+            w = 1. / (1 + pymath.exp(-(K1 - 1) * 0.25)) - 0.5
+            chol = linalg.cholesky(sigma0[k]).diag()
+            noise = torch.randn(K1, **utils.backend(mu)) * w
+            mu[mask] = chol * noise[:, None] + mu0[k]
+            sigma[mask] = sigma0[k] * (1 - w)
+            df[mask] = df0[k] / K1
+            kappa[mask] /= kappa[mask].sum(0, keepdim=True)
+
+        self.mu = mu.to(self.mu)
+        self.sigma = sigma.to(self.sigma)
+        self.df = df.to(self.df)
+        self.kappa = kappa.to(self.kappa)
+        self._update_lb_wishart()
+
+    def _update_lb_wishart(self):
+        if not self.wishart:
+            self._lb_intensity = 0
+            return
+        # update lower bound: KL between inverse wishart,
+        # keeping only terms that depend on sigma
+        sigma = self.sigma.cpu()
+        df = self.df.cpu()  # zero-th order suffstat (not true posterior df)
+        scale, df0 = self.wishart
+
+        chol = linalg.cholesky(sigma)
+        logdet = chol.diagonal(0, -1, -2).log().sum(-1).mul_(2)
+        tr = linalg.trace(torch.matmul(scale, sigma.inverse()))
+        lb = tr * df0 \
+             + logdet * df0 \
+             + sigma.shape[-1] * (df0 + 1) * (df + df0).log() \
+             + (df - 1) * math.mvdigamma((df + df0) / 2, sigma.shape[-1]) \
+             - 2 * torch.mvlgamma((df + df0) / 2, sigma.shape[-1])
+        lb = lb.sum().cpu()
+        self._lb_intensity = -0.5 * lb
+
     def _update_intensity(self, ss0, ss1, ss2):
         """ Update GMM means and variances
 
@@ -1271,6 +1403,12 @@ class UniSeg(SpatialMixture):
             2nd moment
 
         """
+
+        ss0 = ss0.cpu()
+        ss1 = ss1.cpu()
+        ss2 = ss2.cpu()
+        ss0.clamp_min_(1e-6)
+
         # update means
         ss0 = ss0.unsqueeze(-1)
         mu = ss1 / ss0
@@ -1279,49 +1417,16 @@ class UniSeg(SpatialMixture):
         ss0 = ss0.unsqueeze(-1)
         if not self.wishart:
             sigma = ss2 / ss0 - linalg.outer(mu, mu)
+            df = ss0
         else:
-            scale, df = self.wishart
-            sigma = df * scale + ss2 - linalg.outer(ss1, ss1) / ss0
-            sigma /= (ss0 + df)
+            scale, df0 = self.wishart
+            sigma = df0 * scale + ss2 - linalg.outer(ss1, ss1) / ss0
+            sigma /= (ss0 + df0)
 
-        if len(mu) < len(self.mu):
-            # Heuristic to split a single Gaussians into multiple Gaussians.
-            # We do this at initialization time, whereas in preproc8, a
-            # full round of GMM+Bias is performed with one Gaussian per class,
-            # before splitting happens.
-            mu0 = mu
-            sigma0 = sigma
-            ss00 = ss0
-            mu = torch.empty_like(self.mu)
-            sigma = torch.empty_like(self.sigma)
-            ss0 = ss00.new_empty([self.nb_clusters, 1, 1])
-            for k in range(self.nb_classes):
-                mask = [k1 == k for k1 in self.lkp]
-                K1 = sum(mask)
-                w = 1. / (1 + pymath.exp(-(K1 - 1) * 0.25)) - 0.5
-                chol = linalg.cholesky(sigma0[k]).diag()
-                noise = torch.randn(K1, **utils.backend(mu)) * w
-                mu[mask] = chol * noise[:, None] + mu0[k]
-                sigma[mask] = sigma0[k] * (1 - w)
-                ss0[mask] = ss00[k] / K1
-
-        self.mu.copy_(mu)
-        self.sigma.copy_(sigma)
-
-        if self.wishart is not None:
-            # update lower bound: KL between inverse wishart,
-            # keeping only terms that depend on sigma
-            chol = linalg.cholesky(self.sigma)
-            logdet = chol.diagonal(0, -1, -2).log().sum(-1)
-            tr = linalg.trace(torch.matmul(scale, self.sigma.inverse()))
-            # tr = linalg.trace(torch.cholesky_solve(scale, chol))
-            ss0 = ss0[..., 0, 0]
-            lb = tr * (df + ss0 - sigma.shape[-1] - 1) / (df + ss0) \
-               - logdet * (df - sigma.shape[-1] - 1)
-            lb = lb.sum()
-            self._lb_intensity = -0.5*lb
-        else:
-            self._lb_intensity = 0
+        self.mu.copy_(mu.to(self.mu))
+        self.sigma.copy_(sigma.to(self.sigma))
+        self.df.copy_(ss0[:, 0, 0].to(self.df))
+        self._update_lb_wishart()
 
     def _update_bias(self, X, Z, W=None, vx=None):
         """
@@ -1384,4 +1489,4 @@ class UniSeg(SpatialMixture):
             self.beta[c] -= delta[0]
 
         self.beta -= self.beta.mean()
-        self._lb_bias = -0.5*lb + self.beta.sum()
+        self._lb_bias = -0.5*lb.cpu() + self.beta.sum().cpu()

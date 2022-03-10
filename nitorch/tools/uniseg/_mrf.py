@@ -1,5 +1,4 @@
 from nitorch.core import utils, math, linalg
-from nitorch.spatial import spconv
 import itertools
 import torch
 
@@ -28,11 +27,11 @@ def mrf_suffstat(Z, W=None, vx=1):
 
     Notes
     -----
-    ..  This function returns
+    .. This function returns
             Z[k, m] = \sum_{n \in Neighbours(m)} Z[k, n] * W[n] / d(n,m)
-        where Z are the input responsibilities, W are the voxels weights
-        and d(n,m) is the distance between voxels n and m (i.e., voxel size).
-    ..  Only first order neighbors are used (4 in 2D, 6 in 3D).
+       where Z are the input responsibilities, W are the voxels weights
+       and d(n,m) is the distance between voxels n and m (i.e., voxel size).
+    .. Only first order neighbors are used (4 in 2D, 6 in 3D).
 
     Parameters
     ----------
@@ -52,9 +51,11 @@ def mrf_suffstat(Z, W=None, vx=1):
     dim = Z.dim() - 1
     K = len(Z)
     vx = utils.make_vector(vx, dim, dtype=Z.dtype, device='cpu')
-    ivx = vx.reciprocal_().tolist()
+    ivx = vx.reciprocal().tolist()
 
     S = torch.zeros_like(Z)
+    if W is not None:
+        W = W.to(Z.dtype)
 
     # iterate across first order neighbors
     for d in range(dim):
@@ -85,12 +86,12 @@ def mrf_logprior(Z, logP, W=None, vx=1):
 
     Notes
     -----
-    ..  This function returns
+    .. This function returns
             Z[k, m] = \sum_j logP[k, j] \sum_{n \in Neighbours(m)} Z[j, n] * W[n] / d(n,m)
-        where Z are the input responsibilities, W are the voxels weights
-        and d(n,m) is the distance between voxels n and m (i.e., voxel size).
+       where Z are the input responsibilities, W are the voxels weights
+       and d(n,m) is the distance between voxels n and m (i.e., voxel size).
     .. It is equivalent to `logP @ mrf_suffstat(Z)` (but hopefully faster)
-    ..  Only first order neighbors are used (4 in 2D, 6 in 3D).
+    .. Only first order neighbors are used (4 in 2D, 6 in 3D).
 
     Parameters
     ----------
@@ -112,7 +113,7 @@ def mrf_logprior(Z, logP, W=None, vx=1):
     dim = Z.dim() - 1
     K = len(Z)
     vx = utils.make_vector(vx, dim, dtype=Z.dtype, device='cpu')
-    ivx = vx.reciprocal_().tolist()
+    ivx = vx.reciprocal().tolist()
 
     S = torch.zeros_like(Z)
 
@@ -155,12 +156,12 @@ def mrf_covariance(Z, W=None, vx=1):
 
     Notes
     -----
-    ..  This function returns
+    .. This function returns
             V = \sum_n (diag(Z[:, n]) - Z[:, n] @ Z[:, n].T) * W[n]
                 * \sum_{m \in Neighbours(n)} 1/square(d(n,m))
-        where Z are the input responsibilities, W are the voxels weights
-        and d(n,m) is the distance between voxels n and m (i.e., voxel size).
-    ..  Only first order neighbors are used (4 in 2D, 6 in 3D).
+       where Z are the input responsibilities, W are the voxels weights
+       and d(n,m) is the distance between voxels n and m (i.e., voxel size).
+    .. Only first order neighbors are used (4 in 2D, 6 in 3D).
 
     Parameters
     ----------
@@ -184,7 +185,7 @@ def mrf_covariance(Z, W=None, vx=1):
 
     dim = Z.dim() - 1
     vx = utils.make_vector(vx, dim, dtype=Z.dtype, device='cpu')
-    ivx2 = vx.reciprocal_().square_()
+    ivx2 = vx.reciprocal().square_()
 
     # build weights responsibilities
     V = Z.new_zeros(Z.shape[1:])
@@ -195,14 +196,20 @@ def mrf_covariance(Z, W=None, vx=1):
         V = V.transpose(d, 0)
     if W is not None:
         V *= W
-        V *= W
-        V *= W
+        if W.dtype is not torch.bool:
+            V *= W
+            V *= W
     V *= 2  # overcounting
 
     # Compute (weighted) covariance
     V = reduce(Z, Z*V).neg_()
     Vdiag = V.diagonal(0, -1, -2)
-    Vdiag += Z.reshape([len(Z), -1]).matmul(W.reshape([-1, 1]))[:, 0]
+    if W is None:
+        Vdiag += Z.reshape([len(Z), -1]).sum(-1)
+    elif W.dtype is torch.bool:
+        Vdiag += Z[:, W].sum(-1)
+    else:
+        Vdiag += Z.reshape([len(Z), -1]).matmul(W.reshape([-1, 1]))[:, 0]
     return V
 
 
@@ -214,15 +221,14 @@ def mrf(Z, logP, L=None, W=None, vx=1, max_iter=5, tol=1e-4, inplace=False):
     ----------
     Z : (K, *spatial) tensor
         Previous responsibilities
-    logP: (K, K) tensor
+    logP: (K, K) or (K-1, K) tensor
         MRF log-probabilities (do not need to be normalized)
     L : (K, *spatial) tensor, optional
         Log-likelihood
     W : (*spatial) tensor, optional
         Observation weights
     vx : [sequence of] float, default=1
-        Voxel size (or ratio of Z's voxel size and P's voxel size), used
-        to modulate the MRF probabilities.
+        Voxel size, used to modulate the MRF probabilities.
     max_iter : int, default=5
         Maximum number of iterations
     tol : float, default=1e-4
@@ -244,7 +250,7 @@ def mrf(Z, logP, L=None, W=None, vx=1, max_iter=5, tol=1e-4, inplace=False):
     dim = Z.dim() - 1
 
     vx = utils.make_vector(vx, dim, dtype=Z.dtype, device='cpu')
-    ivx = vx.reciprocal_().tolist()
+    ivx = vx.reciprocal().tolist()
 
     K = len(Z)
     Nw = W.sum() if W is not None else Z[0].numel()
@@ -311,13 +317,8 @@ def mrf(Z, logP, L=None, W=None, vx=1, max_iter=5, tol=1e-4, inplace=False):
                                 logP1 = logP1 * ivx1
                                 Z0[(*slicer_pre, ko)].addcmul_(logP1, pre[..., ki])
                                 Z0[(*slicer_post, ko)].addcmul_(logP1, post[..., ki])
-                # normalize by number of neighbors to decrease a bit
-                # the strength of the MRF (I feel that might be the
-                # correct way to normalize the joint probability...)
-                # (update: JA does the same in spm_mrf, so that mat be correct)
-                # Z0.div_(2*dim)
 
-                lZ[slicer0].copy_(Z0)
+                lZ[slicer0].copy_(Z0)  # could be avoided if lZ not needed
 
                 # add likelihood
                 if L is not None:
@@ -332,4 +333,113 @@ def mrf(Z, logP, L=None, W=None, vx=1, max_iter=5, tol=1e-4, inplace=False):
 
     Z = utils.fast_movedim(Z, -1, 0)
     lZ = utils.fast_movedim(lZ, -1, 0)
+    # NOTE: returning lZ could be optional (saving memory and a few copies)
     return Z, lZ
+
+
+def mrf_sample(logP, shape=None, M=None, vx=1, nb_iter=100, implicit=False):
+    """Sample from a MRF using Gibbs conclique sampling
+
+    Parameters
+    ----------
+    logP: (K, K) tensor
+        MRF log-probabilities (do not need to be normalized)
+    shape : sequence[int], optional if M is provided
+        Shape of the lattice
+    M : (K, *shape) tensor, optional
+        Voxel-wise log-probability (do not need to be normalized)
+    vx : [list of] float, default=1
+        Voxel size
+    nb_iter : int, default=100
+        Number of Gibbs iterations
+    implicit : bool, default=False
+
+    Returns
+    -------
+    Z : (*shape) tensor[long]
+        Sample
+
+    References
+    ----------
+    ..[1] "Simulating Markov random fields with a conclique-based Gibbs sampler"
+          Andee Kaplan, Mark S. Kaiser, Soumendra N. Lahiri, Daniel J. Nordman
+          Journal of Computational and Graphical Statistics (2020)
+          https://arxiv.org/abs/1808.04739
+
+    """
+    Cat = torch.distributions.Categorical
+
+    if shape is None and M is None:
+        raise ValueError('Either M or shape must be provided')
+    if shape is None:
+        shape = M.shape[1:]
+    dim = len(shape)
+    K = len(logP)
+    if implicit:
+        K = K + 1
+        logP_ = logP
+        logP = logP_.new_zeros([K, logP_.shape[-1]])
+        logP[1:] = logP_
+    P = logP.new_zeros([K, *shape])             # log-prior
+    if M is None:
+        L = Cat(logits=logP.sum(-1)).sample(shape)
+    elif len(M) == K-1:
+        M0 = M.new_zeros([K, *M.shape[1:]])
+        M0[1:] = M
+        L = Cat(logits=utils.movedim(M0, 0, -1)).sample()
+        del M0
+    else:
+        L = Cat(logits=utils.movedim(M, 0, -1)).sample()
+
+    vx = utils.make_vector(vx, dim, dtype=logP.dtype, device='cpu')
+    ivx = vx.reciprocal().tolist()
+
+    redblack = list(itertools.product([0, 1], repeat=dim))
+    red = [x for x in redblack if sum(x) % 2]
+    black = [x for x in redblack if not sum(x) % 2]
+
+    for n_iter in range(nb_iter):
+
+        for color in (red, black):
+
+            for offset in color:
+
+                # extract center voxel
+                slicer0 = tuple(slice(o, None, 2) for o in offset)
+                L0 = L[slicer0]
+                P0 = P[(Ellipsis, *slicer0)]
+                if M is not None:
+                    if implicit:
+                        P0[1:].copy_(M(Ellipsis, *slicer0))
+                    else:
+                        P0.copy_(M(Ellipsis, *slicer0))
+                else:
+                    P0.zero_()
+
+                # iterate across first order neighbors
+                for d in range(dim):
+                    ivx1 = ivx[d]
+                    slicer_pre = list(slicer0)
+                    slicer_pre[d] = slice(1 - offset[d], None, 2)
+                    pre = L[tuple(slicer_pre)]
+                    slicer_pre = [slice(None)] * dim
+                    slicer_pre[d] = slice(L0.shape[d]+offset[d]-1)
+                    pre = pre[tuple(slicer_pre)]
+                    slicer_pre[d] = slice(1 - offset[d], None)
+
+                    slicer_post = list(slicer0)
+                    slicer_post[d] = slice(offset[d]+1, None, 2)
+                    post = L[tuple(slicer_post)]
+                    slicer_post = [slice(None)] * dim
+                    slicer_post[d] = slice(post.shape[d])
+
+                    for ko in range(K):
+                        for ki in range(K):
+                            logP1 = (logP[ko, ki] * ivx1).item()
+                            P0[(ko, *slicer_pre)].add_(pre == ki, alpha=logP1)
+                            P0[(ko, *slicer_post)].add_(post == ki, alpha=logP1)
+
+            sampler = Cat(logits=utils.movedim(P0, 0, -1))
+            L0.copy_(sampler.sample())
+
+    return L

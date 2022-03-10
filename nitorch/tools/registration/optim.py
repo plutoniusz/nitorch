@@ -1348,14 +1348,18 @@ class IterateOptim(Optim):
     Backtracking line search can be used.
     """
 
-    def __init__(self, optim, max_iter=20, tol=1e-9, ls=0, keep_state=True):
+    def __init__(self, optim, max_iter=20, tol=1e-9, ls=0, stop='gain',
+                 keep_state=True):
         """
 
         Parameters
         ----------
         optim : Optim or IterationStep
+            Optimizer
         max_iter : int, default=20
+            Maximum number of iterations
         tol : float, default=1e-9
+            Tolerance for early stopping
         ls : int or 'wolfe' or callable(Optim), default=0
             If an int, use `StepSizeLineSearch` if optim is a SecondOrder
             optimizer or `BacktrackingLineSearch` if optim is FirstOrder
@@ -1366,6 +1370,7 @@ class IterateOptim(Optim):
         self.optim = optim
         self.max_iter = max_iter
         self.tol = tol
+        self.stop = stop
         if ls:
             if isinstance(self.optim, IterationStep):
                 raise ValueError('Cannot add line search to pre-defined '
@@ -1406,11 +1411,17 @@ class IterateOptim(Optim):
         closure : callable(tensor, [grad=False], [hess=False]) -> Tensor, *Tensor
             Function that takes a parameter and returns the objective and
             its (optionally) gradient evaluated at that point.
+        derivatives : bool, default=False
+            Return gradient on top of parameter
 
         Returns
         -------
         param : tensor
             Updated parameter
+        loss : tensor
+            Updated loss
+        grad : tensor, if `derivatives`
+            Gradient
 
         """
         if not self.keep_state:
@@ -1422,21 +1433,23 @@ class IterateOptim(Optim):
                                                 derivatives=derivatives)
 
             # check convergence
-            num = abs(self.loss_prev-loss)
-            denom = abs(self.loss_max-loss)
-            denom = max(denom, 1e-9 * abs(self.loss_max))
-            if num/denom < self.tol:
+            stop = abs(self.loss_prev-loss)
+            if self.stop == 'gain':
+                denom = abs(self.loss_max-loss)
+                denom = max(denom, 1e-9 * abs(self.loss_max))
+                stop = stop / denom
+            if stop < self.tol:
                 break
             self.loss_prev = loss
             self.loss_max = max(loss, self.loss_max)
 
         if derivatives:
-            return (param, *drv)
-        return param
+            return (param, loss, *drv)
+        return param, loss
 
     def __repr__(self):
         return f'{type(self).__name__}(max_iter={self.max_iter}, ' \
-               f'tol={self.tol}) o {self.optim}'
+               f'tol={self.tol}, stop={self.stop}) o {self.optim}'
 
     __str__ = __repr__
 
@@ -1445,26 +1458,36 @@ class IterateOptimInterleaved(IterateOptim):
     """Interleave optimizers (for block coordinate descent)"""
 
     def __init__(self, optim, max_iter=20, tol=1e-9,
-                 sub_iter=None, sub_tol=None, ls=None):
+                 sub_iter=1, sub_tol=1e-9, ls=None, stop='gain'):
         """
 
         Parameters
         ----------
         optim : list[IterateOptim]
+            Optimizer for each variable
         max_iter : int, default=20
+            Maximum number of outer loops
         tol : float, default=1e-9
-        sub_iter : int, optional
-        sub_tol : float, optional
-        ls : int, optional
+            Outer loop tolerance for early stopping
+
+        Other Parameters (only used if input optimizers are not `IterateOptim`)
+        ----------------
+        sub_iter : int, default=1
+            Maximum number of inner loops
+        sub_tol : float, default=1e-9
+            Inner loop tolerance for early stopping
+        ls : int or 'wolfe', optional
+            Maximum number of backtracking line-search iterations
         """
         # no super call
         self.optim = list(optim)
         self.max_iter = max_iter
         self.tol = tol
+        self.stop = stop
         for i in range(len(optim)):
             if not isinstance(optim[i], IterateOptim):
-                optim[i] = IterateOptim(optim[i], max_iter=sub_iter or 1,
-                                        tol=sub_tol or 1e-9, ls=ls or None)
+                optim[i] = IterateOptim(optim[i], max_iter=sub_iter,
+                                        tol=sub_tol, ls=ls or None, stop=stop)
 
     requires_grad = property(lambda self: any(o.requires_grad for o in self.optim))
     requires_hess = property(lambda self: any(o.requires_hess for o in self.optim))
@@ -1476,37 +1499,45 @@ class IterateOptimInterleaved(IterateOptim):
         ----------
         param : list of tensor
             Initial guess (will be modified inplace)
-        closure : list of callable(tensor, [grad=False], [hess=False]) -> Tensor, *Tensor
+        closure : list of callable(tensor, [grad=False], [hess=False]) -> tensor, *tensor
             Function that takes a parameter and returns the objective and
-            its (optionally) gradient evaluated at that point.
+            (optionally) its gradient evaluated at that point.
+        derivatives : bool, default=False
+            Return gradient on top of parameter
 
         Returns
         -------
         param : list of tensor
             Updated parameter
+        loss : tensor
+            Update loss
+        grad : list of tensor, if `derivatives`
+            Gradients
 
         """
-        gg_prev = float('inf')
-        gg_max = -float('inf')
+        loss_prev = float('inf')
+        loss_max = -float('inf')
         for n_iter in range(1, self.max_iter+1):
             oparam = []
             ograd = []
             for opt, prm, cls in zip(self.optim, param, closure):
-                prm, *derivatives = opt.iter(prm, cls, derivatives=True)
+                prm, loss, *derivatives = opt.iter(prm, cls, derivatives=True)
                 oparam.append(prm)
                 ograd.append(derivatives[0])
 
             # check convergence
-            gg = [g.flatten().dot(g.flatten()) for og in ograd for g in og]
-            gg = sum(gg)
-            if abs((gg_prev-gg)/max(abs(gg_max-gg), 1e-9)) < self.tol:
+            stop = abs(loss_prev-loss)
+            if self.stop == 'gain':
+                denom = max(abs(loss_max-loss), 1e-9)
+                stop /= denom
+            if stop < self.tol:
                 break
-            gg_prev = gg
-            gg_max = max(gg, gg_max)
+            loss_prev = loss
+            loss_max = max(loss, loss_max)
 
         if derivatives:
-            return (oparam, ograd)
-        return oparam
+            return oparam, loss, ograd
+        return oparam, loss
 
     def __repr__(self):
         s = f'{type(self).__name__}(max_iter={self.max_iter}, ' \

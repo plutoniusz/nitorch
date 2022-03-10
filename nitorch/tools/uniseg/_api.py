@@ -10,7 +10,8 @@ from nitorch import io
 def uniseg(x, w=None, affine=None, device=None,
            nb_classes=None, prior=None, affine_prior=None,
            do_bias=True, do_warp=True, do_mixing=True, do_mrf=True,
-           cleanup=None, spacing=3, lam_bias=0.1, lam_warp=0.1,
+           wishart=None, cleanup=None, spacing=3,
+           lam_bias=0.1, lam_warp=0.1, lam_mixing=100, lam_mrf=10, lam_wishart=1,
            max_iter=30, tol=1e-3, verbose=1, plot=0, return_parameters=False):
     """Unified Segmentation using a deformable spatial prior.
 
@@ -28,7 +29,8 @@ def uniseg(x, w=None, affine=None, device=None,
     prior : (K|K-1, *spatial_prior) tensor | str, optional
         Deformable template. If it contains only K-1 channels, the
         first channel is implicitly defined such that probabilities sum to one.
-        The SPM template is used by default
+        If None (default), the SPM template is used.
+        If False, no prior is used.
     affine_prior : (D+1, D+1) tensor, optional
         Orientation matrix of the prior.
 
@@ -48,12 +50,17 @@ def uniseg(x, w=None, affine=None, device=None,
         - 'once' : only at the end
         - 'always' : at each iteration
         - 'learn' : at each iteration and optimize its weights
+    wishart : {False, True, 'preproc8'}, default='preproc8' or True
+        Regularises the estimated covariances using statistics derived
+        from the image. If 'preproc8', a coarser mask derived from the TPM
+        is used to compute these statistics; only works with the SPM prior.
+        If the SPM prior is used, 'preproc8' is activated by default.
     cleanup : bool, optional
         Perform an ad-hoc clean-up procedure at the end.
         By default, it is activated if the SPM template is used else
         it is not used.
     spacing : float, default=3
-        Space (in mm) between sampled points.
+        Space (in mm) between sampled points. None (or 0) uses all the voxels.
         Smaller is more accurate but slower.
 
     Optimization
@@ -62,6 +69,12 @@ def uniseg(x, w=None, affine=None, device=None,
         Regularization of the bias field: larger == stiffer
     lam_warp : float, default=0.1
         Regularization of the warp field: larger == stiffer
+    lam_mixing : float, default=100
+        Regularization of the mixing proportions: larger == closer to atlas
+    lam_mrf : float, default=10
+        Regularization of the MRF weights: larger == less smooth
+    lam_wishart : float, default=1
+        Modulation of the Wishart degrees of freedom: larger == fixed variances
     max_iter : int, default=30
         Maximum  number of EM iterations
     tol : float, default=1-e3
@@ -100,24 +113,38 @@ def uniseg(x, w=None, affine=None, device=None,
     """
     if cleanup is None:
         cleanup = (prior is None)  # only cleanup if (default) SPM template
+    if wishart is None:
+        wishart = 'preproc8' if (prior is None) else True
 
     backend = get_backend(x, prior, device)
-    prior, affine_prior = get_prior(prior, affine_prior, **backend)
-    dim = prior.dim() - 1
+    if prior is not False:
+        prior, affine_prior = get_prior(prior, affine_prior, **backend)
+        dim = prior.dim() - 1
+    else:
+        prior = affine_prior = None
+        if torch.is_tensor(x):
+            dim = x.dim() - 1
+        else:
+            dim = 3
     x, w, affine = get_data(x, w, affine, dim, **backend)
-    affine_prior = affine_prior.to(x.dtype)
+    if affine_prior is not None:
+        affine_prior = affine_prior.to(x.dtype)
 
     if not nb_classes:
+        if prior is None:
+            raise ValueError('If no prior is provided, the number of '
+                             'classes must be provided.')
         if len(prior) == 5:
-            nb_classes = (2, 1, 1, 2, 3, 4)
+            nb_classes = (2, 2, 2, 2, 3, 4)
         else:
             nb_classes = len(prior) + 1
 
     model = UniSeg(
         nb_classes, prior=prior, affine_prior=affine_prior,
         do_bias=do_bias, do_warp=do_warp, do_mixing=do_mixing, do_mrf=do_mrf,
-        lam_bias=lam_bias, lam_warp=lam_warp, spacing=spacing,
-        max_iter=max_iter, tol=tol, verbose=verbose, plot=plot,
+        lam_bias=lam_bias, lam_warp=lam_warp, lam_mixing=lam_mixing, lam_mrf=lam_mrf,
+        spacing=spacing, max_iter=max_iter, tol=tol, verbose=verbose, plot=plot,
+        wishart=wishart, lam_wishart=lam_wishart,
     )
     z, lb = model.fit(x, w, aff=affine)
     if cleanup:
@@ -144,7 +171,8 @@ def uniseg(x, w=None, affine=None, device=None,
 def uniseg_batch(x, w=None, affine=None, device=None,
                  nb_classes=None, prior=None, affine_prior=None,
                  do_bias=True, do_warp=True, do_mixing=True, do_mrf=True,
-                 cleanup=None, spacing=3, lam_bias=0.1, lam_warp=0.1,
+                 wishart=None, cleanup=None, spacing=3, lam_bias=0.1,
+                 lam_warp=0.1, lam_mixing=100, lam_mrf=10, lam_wishart=1,
                  max_iter=30, tol=1e-3, verbose=1, plot=0,
                  return_parameters=False):
     """Batched Unified Segmentation using a deformable spatial prior.
@@ -208,6 +236,7 @@ def uniseg_batch(x, w=None, affine=None, device=None,
             nb_classes=nb_classes, prior=prior, affine_prior=affine_prior,
             do_bias=do_bias, do_warp=do_warp, do_mixing=do_mixing, do_mrf=do_mrf,
             spacing=spacing, cleanup=cleanup, lam_bias=lam_bias, lam_warp=lam_warp,
+            wishart=wishart, lam_mrf=lam_mrf, lam_wishart=lam_wishart, lam_mixing=lam_mixing,
             max_iter=max_iter, tol=tol, verbose=verbose, plot=plot,
             return_parameters=return_parameters)
         z.append(out1[0])
@@ -284,12 +313,12 @@ def get_data(x, w, affine, dim, **backend):
                 f = f.movedim(-1, 0)
             else:
                 f = f[None]
-            x = f.fdata(**backend, missing=0)
+            x = f.fdata(**backend, rand=True, missing=0)
         else:
             f = io.stack([io.map(x1) for x1 in x])
             if affine is None:
                 f = f.affine[0]
-            x = f.fdata(**backend, missing=0)
+            x = f.fdata(**backend, rand=True, missing=0)
 
     if x.dim() > dim + 1:
         x = x.unsqeeze(-1)
@@ -305,4 +334,7 @@ def get_data(x, w, affine, dim, **backend):
         if x.dim() > dim:
             raise ValueError('Too many dimensions')
 
+    x = x.contiguous()
+    if w is not None:
+        w = w.contiguous()
     return x, w, affine

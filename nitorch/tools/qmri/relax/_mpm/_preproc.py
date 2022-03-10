@@ -153,8 +153,8 @@ def preproc(data, transmit=None, receive=None, opt=None):
         mt = mt.log() - (1 - mt).log()
 
     # --- initial align ---
-    transmit = core.utils.make_list(transmit or [])
-    receive = core.utils.make_list(receive or [])
+    transmit = core.py.make_list(transmit or [])
+    receive = core.py.make_list(receive or [])
     if opt.preproc.register and len(data) > 1:
         print('Register volumes')
         data_reg = [(contrast.echo(0).fdata(rand=True, cache=False, **backend),
@@ -174,8 +174,9 @@ def preproc(data, transmit=None, receive=None, opt=None):
         #         plt.axis('off')
         #     plt.show()
         for contrast, aff in zip(data + transmit + receive, affines):
-            aff, contrast.affine = core.utils.to_max_device(aff, contrast.affine)
-            contrast.affine = torch.matmul(aff.inverse(), contrast.affine)
+            if contrast is not None:
+                aff, contrast.affine = core.utils.to_max_device(aff, contrast.affine)
+                contrast.affine = torch.matmul(aff.inverse(), contrast.affine)
 
     # --- compute recon space ---
     affines = [contrast.affine for contrast in data]

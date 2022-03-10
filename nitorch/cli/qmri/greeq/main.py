@@ -12,7 +12,7 @@ import os
 def cli(args=None):
     f"""Command-line interface for `greeq`
 
-    {help[1]}
+    {help}
 
     """
 
@@ -20,7 +20,7 @@ def cli(args=None):
     try:
         _cli(args)
     except ParseError as e:
-        print(help[1])
+        print(help)
         print(f'[ERROR] {str(e)}', file=sys.stderr)
     # except Exception as e:
     #     print(f'[ERROR] {str(e)}', file=sys.stderr)
@@ -62,13 +62,27 @@ def _main(options):
     greeq_opt.verbose = options.verbose
     # greeq_opt.plot = options.verbose >= 2
     greeq_opt.recon.space = options.space
+    if isinstance(options.space, str) and options.space != 'mean':
+        for c, contrast in enumerate(options.contrast):
+            if contrast.name == options.space:
+                greeq_opt.recon.space = c
+                break
+    greeq_opt.recon.crop = options.crop
     greeq_opt.backend.device = device
     greeq_opt.uncertainty = options.uncertainty
     greeq_opt.optim.nb_levels = options.levels
     greeq_opt.optim.max_iter_rls = options.iter
     greeq_opt.optim.tolerance = options.tol
     greeq_opt.optim.tolerance_cg = options.tol
-    greeq_opt.optim.solver = options.solver
+    solver, *subiter_max = options.solver
+    if subiter_max:
+        subiter_max = int(subiter_max[0])
+    elif solver == 'fmg':
+        subiter_max = 2
+    else:  # cg
+        subiter_max = 32
+    greeq_opt.optim.solver = solver
+    greeq_opt.optim.max_iter_cg = subiter_max
     greeq_opt.penalty.norm = options.regularization
     greeq_opt.penalty.factor = {
         'pd': options.lam_pd if options.lam_pd else options.lam,
@@ -133,7 +147,7 @@ def _main(options):
         if c.transmit:
             files = c.transmit
             meta = {}
-            if files[-1] in ('%', 'pct', 'p.u.', 'a.u'):
+            if files[-1] in ('%', 'pct', 'p.u.', 'a.u.'):
                 *files, unit = files
                 meta['unit'] = unit
             files, *mag = files
@@ -144,7 +158,7 @@ def _main(options):
         if c.receive:
             files = c.receive
             meta = {}
-            if files[-1] in ('%', 'pct', 'p.u.', 'a.u'):
+            if files[-1] in ('%', 'pct', 'p.u.', 'a.u.'):
                 *files, unit = files
                 meta['unit'] = unit
             files, *mag = files
@@ -168,7 +182,7 @@ def _main(options):
     if options.transmit:
         files = options.transmit
         meta = {}
-        if files[-1] in ('%', 'pct', 'p.u.', 'a.u'):
+        if files[-1] in ('%', 'pct', 'p.u.', 'a.u.'):
             *files, unit = files
             meta['unit'] = unit
         files, *mag = files
@@ -181,7 +195,7 @@ def _main(options):
     if options.receive:
         files = options.receive
         meta = {}
-        if files[-1] in ('%', 'pct', 'p.u.', 'a.u'):
+        if files[-1] in ('%', 'pct', 'p.u.', 'a.u.'):
             *files, unit = files
             meta['unit'] = unit
         files, *mag = files
@@ -194,7 +208,7 @@ def _main(options):
     if options.b0:
         files = options.b0
         meta = {}
-        if files[-1] in ('%', 'pct', 'p.u.', 'a.u'):
+        if files[-1] in ('%', 'pct', 'p.u.', 'a.u.'):
             *files, unit = files
             meta['unit'] = unit
         files, *mag = files
