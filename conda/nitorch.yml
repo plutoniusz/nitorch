@@ -1,4 +1,4 @@
-name: nitorch
+name: nitorchnew
 channels:
   - conda-forge
   - pytorch

@@ -1,0 +1,27 @@
+diff --git a/buildtools.py b/buildtools.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/_C/__init__.py b/nitorch/_C/__init__.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/_C/spatial.cpp b/nitorch/_C/spatial.cpp
+old mode 100644
+new mode 100755
+diff --git a/nitorch/__init__.py b/nitorch/__init__.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/core/kernels.py b/nitorch/core/kernels.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/core/optim.py b/nitorch/core/optim.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/spatial/_grid.py b/nitorch/spatial/_grid.py
+old mode 100644
+new mode 100755
+diff --git a/nitorch/tests/test_gradcheck_spatial.py b/nitorch/tests/test_gradcheck_spatial.py
+old mode 100644
+new mode 100755
+diff --git a/setup.py b/setup.py
+old mode 100644
+new mode 100755
