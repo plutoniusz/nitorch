@@ -262,9 +262,9 @@ class BaseND:
         old_attributes = [getattr(instance, key) 
                           for key in new.attributes()
                           if key in instance.attributes()]
-        print(old_attributes)
-        old_attributes = dict.fromkeys(old_attributes)
-        print(old_attributes)
+        #print(old_attributes)
+        #old_attributes = dict.fromkeys(old_attributes)
+        #print(old_attributes)
         old_attributes.update(attributes)
         new.set_attributes(**old_attributes)
         new.atleast_3d_()
